@@ -5,6 +5,7 @@ from collections import deque
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from myplotter.motion.trajectory import plan_path
 from myplotter.pen.control import set_pen
 
 
@@ -32,32 +33,19 @@ class ReturnJob(QObject):
             set_pen(self.board, True)
             self.board.wait_idle(self.stop_event.is_set)
             current = self.board.query_steps()
-            delta = (self.origin_steps[0] - current[0],
-                     self.origin_steps[1] - current[1])
-            distance = self._distance(*delta)
-            pieces = max(1, math.ceil(distance / 5))
-            previous = (0, 0)
+            resolution = self.steps_per_mm * (math.sqrt(2) if self.geometry == "mixed" else 1)
+            points = [tuple(value / resolution for value in position)
+                      for position in (current, self.origin_steps)]
             pending = deque()
-            for index in range(1, pieces + 1):
+            for move in plan_path(points, resolution, self.speed_mm_s):
                 if self.stop_event.is_set():
                     break
-                target = (round(delta[0] * index / pieces),
-                          round(delta[1] * index / pieces))
-                first = target[0] - previous[0]
-                second = target[1] - previous[1]
-                previous = target
-                if first == 0 and second == 0:
-                    continue
-                duration = max(10, math.ceil(1000 * self._distance(first, second)
-                                             / self.speed_mm_s))
-                if max(abs(first), abs(second)) / duration > 25:
-                    raise ValueError("Return move exceeds board step rate")
                 while len(pending) >= 2 and not self.stop_event.is_set():
                     self._drain(pending)
                 if self.stop_event.is_set():
                     break
-                self.board.command(f"SM,{duration},{first},{second}")
-                pending.append(target)
+                self.board.command(move.command("cartesian"))
+                pending.append(move.position)
             while pending and not self.stop_event.is_set():
                 self._drain(pending)
             if self.stop_event.is_set():
@@ -81,15 +69,6 @@ class ReturnJob(QObject):
         self._emit_position()
         if pending:
             time.sleep(0.004)
-
-    def _distance(self, motor_1, motor_2):
-        if self.geometry == "mixed":
-            x = (motor_1 + motor_2) / (2 * self.steps_per_mm)
-            y = (motor_1 - motor_2) / (2 * self.steps_per_mm)
-        else:
-            x = motor_1 / self.steps_per_mm
-            y = motor_2 / self.steps_per_mm
-        return math.hypot(x, y)
 
     def _emit_position(self):
         current = self.board.query_steps()

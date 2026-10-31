@@ -1,4 +1,3 @@
-import math
 import threading
 import time
 from collections import deque
@@ -6,6 +5,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from myplotter.motion.trajectory import plan_path
 from myplotter.pen.control import pen_command, set_pen
 
 
@@ -74,11 +74,6 @@ class PlotJob(QObject):
                         self.progress.emit(completed)
                     self.position_changed.emit(*motion.position, self.pen_is_down)
 
-                now = time.monotonic()
-                if now - last_position_update >= 0.05:
-                    self._emit_actual_position()
-                    last_position_update = now
-
                 if self.pause_event.is_set() and not pending:
                     if not self._wait_while_paused():
                         break
@@ -93,7 +88,14 @@ class PlotJob(QObject):
                     self.board.command(motion.command)
                     pending.append(motion)
 
+                now = time.monotonic()
+                if now - last_position_update >= 0.05:
+                    self._emit_actual_position()
+                    last_position_update = now
+
                 if exhausted and not pending:
+                    if self.board.query_steps() != self.origin_steps:
+                        raise RuntimeError("Plot did not return to the saved start position")
                     self.progress.emit(completed)
                     success = True
                     message = "Complete"
@@ -140,50 +142,24 @@ class PlotJob(QObject):
 
     def _motions(self):
         position = (0.0, 0.0)
-        deferred_progress = 0
         yield Motion(pen_command(True), position, False)
         for path in self.drawing.paths:
-            yield from self._move(position, path[0], False)
+            yield from self._move([position, path[0]], False)
             position = path[0]
             yield Motion(pen_command(False), position, True)
-            for point in path[1:]:
-                pieces = list(self._move(position, point, True))
-                if pieces:
-                    pieces[-1] = Motion(pieces[-1].command, pieces[-1].position,
-                                        True, deferred_progress + 1)
-                    deferred_progress = 0
-                    yield from pieces
-                else:
-                    deferred_progress += 1
-                position = point
+            completed = 0
+            for motion in self._move(path, True):
+                completed += motion.progress
+                yield motion
+            position = path[-1]
             yield Motion(pen_command(True), position, False,
-                         deferred_progress)
-            deferred_progress = 0
-        yield from self._move(position, (0.0, 0.0), False)
+                         len(path) - 1 - completed)
+        yield from self._move([position, (0.0, 0.0)], False)
 
-    def _move(self, position, target, pen_down):
-        distance = math.hypot(target[0] - position[0], target[1] - position[1])
-        pieces = max(1, math.ceil(distance / 5))
-        origin = position
-        for index in range(1, pieces + 1):
-            fraction = index / pieces
-            next_point = (origin[0] + (target[0] - origin[0]) * fraction,
-                          origin[1] + (target[1] - origin[1]) * fraction)
-            old = tuple(round(value * self.steps_per_mm) for value in position)
-            new = tuple(round(value * self.steps_per_mm) for value in next_point)
-            dx, dy = new[0] - old[0], new[1] - old[1]
-            if dx or dy:
-                duration = max(10, math.ceil(1000 * math.hypot(
-                    next_point[0] - position[0], next_point[1] - position[1])
-                    / self.speed_mm_s))
-                motor_steps = ((dx + dy, dx - dy) if self.geometry == "mixed"
-                               else (dx, dy))
-                if any(abs(value) / duration > 25 for value in motor_steps):
-                    raise ValueError("Move exceeds board step rate; lower the speed")
-                command = (f"XM,{duration},{dx},{dy}" if self.geometry == "mixed"
-                           else f"SM,{duration},{dx},{dy}")
-                yield Motion(command, next_point, pen_down)
-            position = next_point
+    def _move(self, points, pen_down):
+        for move in plan_path(points, self.steps_per_mm, self.speed_mm_s):
+            yield Motion(move.command(self.geometry), move.position,
+                         pen_down, move.progress if pen_down else 0)
 
     def _emit_actual_position(self):
         motor_1, motor_2 = self.board.query_steps()
