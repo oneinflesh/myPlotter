@@ -7,6 +7,14 @@ USB_VID = 0x04D8
 USB_PID = 0xFD92
 
 
+def _read_line(port):
+    for _ in range(3):
+        line = port.readline().decode("ascii", errors="replace").strip()
+        if line:
+            return line
+    return ""
+
+
 def discover_boards():
     return [port.device for port in list_ports.comports()
             if port.vid == USB_VID and port.pid == USB_PID]
@@ -26,7 +34,7 @@ class Board:
         try:
             port.reset_input_buffer()
             port.write(b"V\r")
-            version = port.readline().decode("ascii", errors="replace").strip()
+            version = _read_line(port)
             if not version.startswith("EBB"):
                 raise RuntimeError(f"No EiBotBoard response on {name}")
         except Exception:
@@ -44,19 +52,21 @@ class Board:
         if not self.connected:
             raise RuntimeError("Connect to the plotter first")
         self.port.write((value + "\r").encode("ascii"))
-        response = self.port.readline().decode("ascii", errors="replace").strip()
+        response = _read_line(self.port)
         if response != "OK":
             raise RuntimeError(response or "Board did not acknowledge the command")
 
-    def wait_idle(self, stop_requested=None):
+    def wait_idle(self, stop_requested=None, on_poll=None):
         if not self.connected:
             raise RuntimeError("Plotter disconnected")
         while True:
             self.port.write(b"QM\r")
-            response = self.port.readline().decode("ascii", errors="replace").strip()
+            response = _read_line(self.port)
             parts = response.split(",")
             if len(parts) != 5 or parts[0] != "QM":
                 raise RuntimeError(f"Unexpected motor status: {response or 'no response'}")
+            if on_poll is not None:
+                on_poll()
             if all(value == "0" for value in parts[1:]):
                 return
             if stop_requested is not None and stop_requested():
@@ -69,7 +79,21 @@ class Board:
             return
         self.port.write(b"ES\r")
         for _ in range(2):
-            response = self.port.readline().decode("ascii", errors="replace").strip()
+            response = _read_line(self.port)
             if response == "OK":
                 return
         raise RuntimeError("Board did not acknowledge stop")
+
+    def query_steps(self):
+        if not self.connected:
+            raise RuntimeError("Plotter disconnected")
+        self.port.write(b"QS\r")
+        response = _read_line(self.port)
+        acknowledgement = _read_line(self.port)
+        try:
+            first, second = (int(value) for value in response.split(","))
+        except ValueError as error:
+            raise RuntimeError(f"Unexpected position response: {response}") from error
+        if acknowledgement != "OK":
+            raise RuntimeError("Board did not acknowledge position query")
+        return first, second

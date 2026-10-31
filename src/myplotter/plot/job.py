@@ -7,15 +7,19 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 class PlotJob(QObject):
     progress = Signal(int)
+    position_changed = Signal(float, float, bool)
     finished = Signal(bool, str)
 
-    def __init__(self, board, drawing, steps_per_mm, speed_mm_s, geometry):
+    def __init__(self, board, drawing, steps_per_mm, speed_mm_s, geometry,
+                 origin_steps):
         super().__init__()
         self.board = board
         self.drawing = drawing
         self.steps_per_mm = steps_per_mm
         self.speed_mm_s = speed_mm_s
         self.geometry = geometry
+        self.origin_steps = origin_steps
+        self.pen_is_down = False
         self.stop_event = threading.Event()
 
     def stop(self):
@@ -30,6 +34,7 @@ class PlotJob(QObject):
         success = False
         message = "Stopped"
         try:
+            self.position_changed.emit(0.0, 0.0, False)
             self.board.command("SP,1,500")
             self.board.wait_idle(self.stop_event.is_set)
             for path in self.drawing.paths:
@@ -38,6 +43,8 @@ class PlotJob(QObject):
                 position = self._move(position, path[0])
                 self.board.command("SP,0,500")
                 pen_down = True
+                self.pen_is_down = True
+                self.position_changed.emit(position[0], position[1], True)
                 self.board.wait_idle(self.stop_event.is_set)
                 for point in path[1:]:
                     if self.stop_event.is_set():
@@ -52,6 +59,8 @@ class PlotJob(QObject):
                         last_update = now
                 self.board.command("SP,1,500")
                 pen_down = False
+                self.pen_is_down = False
+                self.position_changed.emit(position[0], position[1], False)
                 self.board.wait_idle(self.stop_event.is_set)
             if not self.stop_event.is_set():
                 position = self._move(position, (0, 0))
@@ -64,6 +73,7 @@ class PlotJob(QObject):
             if pen_down and self.board.connected:
                 try:
                     self.board.command("SP,1,500")
+                    self.pen_is_down = False
                 except Exception:
                     pass
             self.finished.emit(success, message)
@@ -99,4 +109,18 @@ class PlotJob(QObject):
         if any(abs(value) / duration > 25 for value in motor_steps):
             raise ValueError("Move exceeds board step rate; lower the speed")
         self.board.command(command)
-        self.board.wait_idle(self.stop_event.is_set)
+        self.board.wait_idle(self.stop_event.is_set, self._emit_actual_position)
+        if not self.stop_event.is_set():
+            self.position_changed.emit(target[0], target[1], self.pen_is_down)
+
+    def _emit_actual_position(self):
+        motor_1, motor_2 = self.board.query_steps()
+        first = motor_1 - self.origin_steps[0]
+        second = motor_2 - self.origin_steps[1]
+        if self.geometry == "mixed":
+            x = (first + second) / (2 * self.steps_per_mm)
+            y = (first - second) / (2 * self.steps_per_mm)
+        else:
+            x = first / self.steps_per_mm
+            y = second / self.steps_per_mm
+        self.position_changed.emit(x, y, self.pen_is_down)

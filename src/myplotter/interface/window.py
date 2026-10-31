@@ -11,6 +11,7 @@ from myplotter.motion.control import jog, release_motors
 from myplotter.pen.control import set_pen
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
+from myplotter.position.origin import StartPoint
 from myplotter.svg.loader import SvgLoader
 from myplotter.svg.preview import DrawingPreview
 
@@ -19,6 +20,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.board = Board()
+        self.start_point = StartPoint()
         self.drawing = None
         self.source_drawing = None
         self.filename = None
@@ -89,6 +91,14 @@ class MainWindow(QMainWindow):
         plot_settings.addRow("Speed", self.speed)
         sidebar.addWidget(self.plot_group)
 
+        self.start_button = QPushButton("Set current pen position as page start")
+        self.start_button.setEnabled(False)
+        self.start_button.clicked.connect(self.set_start_point)
+        sidebar.addWidget(self.start_button)
+        self.start_label = QLabel("Place pen at the paper's top-left corner, then set start.")
+        self.start_label.setWordWrap(True)
+        sidebar.addWidget(self.start_label)
+
         plot_row = QHBoxLayout()
         self.plot_button = QPushButton("Start plot")
         self.plot_button.clicked.connect(self.start_plot)
@@ -125,18 +135,18 @@ class MainWindow(QMainWindow):
         settings.addRow("Steps", self.steps)
         settings.addRow("Time", self.duration)
         motion_layout.addLayout(settings)
-        for axis in (1, 2):
+        for axis in ("X", "Y"):
             axis_row = QHBoxLayout()
             for direction, sign in (("−", -1), ("+", 1)):
-                button = QPushButton(f"Axis {axis} {direction}")
+                button = QPushButton(f"{axis} {direction}")
                 button.clicked.connect(lambda _checked=False, a=axis, s=sign: self.run(
-                    lambda: jog(self.board, a, s * self.steps.value(), self.duration.value())))
+                    lambda: self.jog_axis(a, s * self.steps.value())))
                 axis_row.addWidget(button)
             motion_layout.addLayout(axis_row)
         sidebar.addWidget(self.motion_group)
 
         self.release_button = QPushButton("Release motors")
-        self.release_button.clicked.connect(lambda: self.run(lambda: release_motors(self.board)))
+        self.release_button.clicked.connect(lambda: self.run(self.release_motors))
         sidebar.addWidget(self.release_button)
         sidebar.addStretch()
         container = QWidget()
@@ -199,6 +209,7 @@ class MainWindow(QMainWindow):
             f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
             f"{self.drawing.segments} segments")
         self.preview.set_drawing(self.drawing)
+        self.preview.set_start_ready(self.start_point.is_set)
         self.progress.setMaximum(self.drawing.segments)
         self.progress.setValue(0)
         notes = [f"Ready | artwork at {factor:.0%} scale | 10 mm margin"]
@@ -209,6 +220,8 @@ class MainWindow(QMainWindow):
     def toggle_connection(self):
         if self.board.connected:
             self.board.disconnect()
+            self.clear_start()
+            self.start_button.setEnabled(False)
             self.status.setText("Disconnected")
             self.connect_button.setText("Connect")
             return
@@ -222,6 +235,30 @@ class MainWindow(QMainWindow):
             return
         self.status.setText(f"Connected: {version}")
         self.connect_button.setText("Disconnect")
+        self.start_button.setEnabled(True)
+
+    def clear_start(self):
+        self.start_point.clear()
+        self.start_label.setText("Place pen at the paper's top-left corner, then set start.")
+        self.preview.set_start_ready(False)
+
+    def set_start_point(self):
+        try:
+            self.start_point.capture(self.board)
+        except Exception as error:
+            QMessageBox.critical(self, "Start point", str(error))
+            return
+        self.start_label.setText("Page start set at the pen's current position.")
+        self.preview.set_start_ready(True)
+        self.preview.set_head(0, 0, False)
+
+    def jog_axis(self, axis, steps):
+        self.clear_start()
+        jog(self.board, axis, steps, self.duration.value(), self.geometry.currentData())
+
+    def release_motors(self):
+        self.clear_start()
+        release_motors(self.board)
 
     def start_plot(self):
         if self.drawing is None:
@@ -230,16 +267,25 @@ class MainWindow(QMainWindow):
         if not self.board.connected:
             QMessageBox.warning(self, "Plotter", "Connect the EiBotBoard first.")
             return
+        try:
+            self.start_point.verify(self.board)
+        except Exception as error:
+            self.clear_start()
+            QMessageBox.warning(self, "Start point", str(error))
+            return
         self.preview.set_completed(0)
+        self.preview.set_head(0, 0, False)
         self.progress.setValue(0)
         self.plot_status.setText("Plotting…")
         self._set_plotting(True)
         self.thread = QThread(self)
         self.job = PlotJob(self.board, self.drawing, self.steps_per_mm.value(),
-                           self.speed.value(), self.geometry.currentData())
+                           self.speed.value(), self.geometry.currentData(),
+                           self.start_point.steps)
         self.job.moveToThread(self.thread)
         self.thread.started.connect(self.job.run)
         self.job.progress.connect(self._plot_progress)
+        self.job.position_changed.connect(self.preview.set_head)
         self.job.finished.connect(self._plot_finished)
         self.job.finished.connect(self.thread.quit)
         self.thread.finished.connect(self.job.deleteLater)
@@ -255,9 +301,14 @@ class MainWindow(QMainWindow):
     def _plot_progress(self, count):
         self.progress.setValue(count)
         self.preview.set_completed(count)
+        if self.job is not None and not self.job.stop_event.is_set():
+            self.plot_status.setText(f"Plotting | {count} / {self.drawing.segments} segments "
+                                     f"({count / self.drawing.segments:.0%})")
 
     def _plot_finished(self, success, message):
         self.plot_status.setText(message)
+        if not success:
+            self.clear_start()
         if not success and message != "Stopped":
             QMessageBox.critical(self, "Plot failed", message)
 
@@ -273,6 +324,7 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(not active)
         self.connect_button.setEnabled(not active)
         self.choose_button.setEnabled(not active)
+        self.start_button.setEnabled(not active and self.board.connected)
         self.plot_group.setEnabled(not active)
         self.plot_button.setEnabled(not active)
         self.stop_button.setEnabled(active)
