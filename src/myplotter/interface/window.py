@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QProgressDialog, QPushButton,
@@ -9,7 +9,10 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
 from myplotter.connection.board import Board, discover_boards
 from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
 from myplotter.motion.control import release_motors
-from myplotter.pen.control import configure_pen, set_pen
+from myplotter.motion.jog import JogControl
+from myplotter.motion.joystick import Joystick
+from myplotter.pen.control import configure_pen, set_height
+from myplotter.pen.dialog import PenDialog
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
 from myplotter.plot.return_job import ReturnJob
@@ -22,6 +25,10 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.board = Board()
+        self.jog = JogControl(self.board, lambda: self.geometry.currentData())
+        self.jog.moved.connect(self._jog_moved)
+        self.jog.failed.connect(lambda message: QMessageBox.critical(
+            self, "Joystick error", message))
         self.start_point = StartPoint()
         self.drawing = None
         self.source_drawing = None
@@ -88,11 +95,26 @@ class MainWindow(QMainWindow):
         plot_settings.addRow("Speed", self.speed)
         sidebar.addWidget(self.plot_group)
 
+        self.joystick_group = QGroupBox("Position joystick")
+        joystick_layout = QVBoxLayout(self.joystick_group)
+        self.joystick = Joystick()
+        self.joystick.direction_changed.connect(self._jog_direction)
+        joystick_layout.addWidget(self.joystick, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.joystick_group.setEnabled(False)
+        sidebar.addWidget(self.joystick_group)
+        self.release_button = QPushButton("Release motors")
+        self.release_button.clicked.connect(lambda: self.run(self.release_motors))
+        sidebar.addWidget(self.release_button)
+        self.pen_button = QPushButton("Pen Controllers")
+        self.pen_button.clicked.connect(self.open_pen_dialog)
+        self.pen_button.setEnabled(False)
+        sidebar.addWidget(self.pen_button)
+
         self.start_button = QPushButton("Set current pen position as page start")
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.set_start_point)
         sidebar.addWidget(self.start_button)
-        self.start_label = QLabel("Release motors, place pen at the paper's top-left corner, then set start.")
+        self.start_label = QLabel("Use the joystick or place the pen at the paper's top-left corner, then set start.")
         self.start_label.setWordWrap(True)
         sidebar.addWidget(self.start_label)
 
@@ -118,18 +140,6 @@ class MainWindow(QMainWindow):
         self.plot_status = QLabel("Ready")
         canvas.addWidget(self.plot_status)
 
-        self.pen_group = QGroupBox("Pen")
-        pen_row = QHBoxLayout(self.pen_group)
-        for label, raised in (("Up", True), ("Down", False)):
-            button = QPushButton(label)
-            button.clicked.connect(lambda _checked=False, up=raised: self.run(
-                lambda: set_pen(self.board, up)))
-            pen_row.addWidget(button)
-        sidebar.addWidget(self.pen_group)
-
-        self.release_button = QPushButton("Release motors")
-        self.release_button.clicked.connect(lambda: self.run(self.release_motors))
-        sidebar.addWidget(self.release_button)
         sidebar.addStretch()
         container = QWidget()
         container.setLayout(root)
@@ -201,9 +211,13 @@ class MainWindow(QMainWindow):
 
     def toggle_connection(self):
         if self.board.connected:
+            self.jog.stop()
             self.board.disconnect()
+            self.jog.enabled = False
             self.clear_start()
             self.start_button.setEnabled(False)
+            self.joystick_group.setEnabled(False)
+            self.pen_button.setEnabled(False)
             self.status.setText("Disconnected")
             self.connect_button.setText("Connect")
             return
@@ -213,6 +227,11 @@ class MainWindow(QMainWindow):
         try:
             version = self.board.connect(self.ports.currentText())
             configure_pen(self.board)
+            settings = QSettings("MyPlotter", "MyPlotter")
+            if settings.contains("pen/up"):
+                set_height(self.board, True, int(settings.value("pen/up")))
+            if settings.contains("pen/down"):
+                set_height(self.board, False, int(settings.value("pen/down")))
         except Exception as error:
             self.board.disconnect()
             QMessageBox.critical(self, "Connection failed", str(error))
@@ -220,15 +239,18 @@ class MainWindow(QMainWindow):
         self.status.setText(f"Connected: {version}")
         self.connect_button.setText("Disconnect")
         self.start_button.setEnabled(True)
+        self.joystick_group.setEnabled(True)
+        self.pen_button.setEnabled(True)
 
     def clear_start(self):
         self.start_point.clear()
-        self.start_label.setText("Release motors, place pen at the paper's top-left corner, then set start.")
+        self.start_label.setText("Use the joystick or place the pen at the paper's top-left corner, then set start.")
         self.preview.set_start_ready(False)
         self.return_button.setEnabled(False)
 
     def set_start_point(self):
         try:
+            self.jog.stop()
             self.start_point.capture(self.board)
         except Exception as error:
             QMessageBox.critical(self, "Start point", str(error))
@@ -239,8 +261,26 @@ class MainWindow(QMainWindow):
         self.return_button.setEnabled(True)
 
     def release_motors(self):
+        self.jog.stop()
+        self.board.wait_idle()
         self.clear_start()
         release_motors(self.board)
+        self.jog.enabled = False
+
+    def _jog_direction(self, x, y):
+        if self.board.connected and self.job is None:
+            self.jog.set_direction(x, y)
+
+    def _jog_moved(self):
+        if self.start_point.is_set:
+            self.clear_start()
+
+    def open_pen_dialog(self):
+        if not self.board.connected:
+            QMessageBox.warning(self, "Pen Controllers", "Connect the plotter first.")
+            return
+        self.jog.stop()
+        PenDialog(self.board, self).exec()
 
     def start_plot(self):
         if self.drawing is None:
@@ -277,6 +317,8 @@ class MainWindow(QMainWindow):
         self._start_worker()
 
     def _start_worker(self):
+        self.jog.stop()
+        self.board.wait_idle()
         self._set_plotting(True)
         self.thread = QThread(self)
         self.job.moveToThread(self.thread)
@@ -350,7 +392,8 @@ class MainWindow(QMainWindow):
             self.pause_button.setText("Pause")
         self.stop_button.setEnabled(active)
         self.return_button.setEnabled(not active and self.start_point.is_set and self.board.connected)
-        self.pen_group.setEnabled(not active)
+        self.joystick_group.setEnabled(not active and self.board.connected)
+        self.pen_button.setEnabled(not active and self.board.connected)
         self.release_button.setEnabled(not active)
 
     def run(self, action):
