@@ -2,6 +2,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
+from myplotter.plot.estimate import format_duration
+
 
 class DrawingPreview(QWidget):
     def __init__(self):
@@ -11,6 +13,7 @@ class DrawingPreview(QWidget):
         self.head = None
         self.pen_down = False
         self.start_ready = False
+        self.estimated_seconds = None
         self.setMinimumHeight(320)
 
     def set_drawing(self, drawing):
@@ -27,6 +30,10 @@ class DrawingPreview(QWidget):
 
     def set_completed(self, count):
         self.completed = count
+        self.update()
+
+    def set_estimate(self, seconds):
+        self.estimated_seconds = seconds
         self.update()
 
     def set_head(self, x, y, pen_down):
@@ -90,11 +97,13 @@ class DrawingPreview(QWidget):
             painter.drawEllipse(head, 9, 9)
 
         percent = round(100 * self.completed / self.drawing.segments)
+        estimate = (f"  |  Estimated time: {format_duration(self.estimated_seconds)}"
+                    if self.estimated_seconds is not None else "")
         painter.setPen(QColor("#152238"))
         painter.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         painter.drawText(self.rect().adjusted(16, 8, -16, -8),
                          Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
-                         f"{percent}% complete  |  green: drawn  |  gray: remaining")
+                         f"{percent}% complete{estimate}")
         painter.setFont(QFont("Segoe UI", 9))
         painter.drawText(self.rect().adjusted(16, 8, -16, -8),
                          Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,

@@ -11,10 +11,11 @@ from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
 from myplotter.motion.control import release_motors
 from myplotter.motion.jog import JogControl
 from myplotter.motion.joystick import Joystick
-from myplotter.pen.control import configure_pen, set_height
+from myplotter.pen.control import configure_pen, set_height, set_pen
 from myplotter.pen.dialog import PenDialog
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
+from myplotter.plot.estimate import estimate_seconds
 from myplotter.plot.return_job import ReturnJob
 from myplotter.position.origin import StartPoint
 from myplotter.svg.loader import SvgLoader
@@ -92,6 +93,7 @@ class MainWindow(QMainWindow):
         self.speed = QComboBox()
         self.speed.addItems(SPEED_PRESETS)
         self.speed.setCurrentText("Medium")
+        self.speed.currentTextChanged.connect(self.update_estimate)
         plot_settings.addRow("Speed", self.speed)
         sidebar.addWidget(self.plot_group)
 
@@ -108,7 +110,17 @@ class MainWindow(QMainWindow):
         self.pen_button = QPushButton("Pen Controllers")
         self.pen_button.clicked.connect(self.open_pen_dialog)
         self.pen_button.setEnabled(False)
-        sidebar.addWidget(self.pen_button)
+        self.pen_up_button = QPushButton("Pen Up")
+        self.pen_up_button.clicked.connect(lambda: self.run(lambda: self.move_pen(True)))
+        self.pen_down_button = QPushButton("Pen Down")
+        self.pen_down_button.clicked.connect(lambda: self.run(lambda: self.move_pen(False)))
+        pen_row = QHBoxLayout()
+        pen_row.addWidget(self.pen_button)
+        pen_row.addWidget(self.pen_up_button)
+        pen_row.addWidget(self.pen_down_button)
+        sidebar.addLayout(pen_row)
+        self.pen_up_button.setEnabled(False)
+        self.pen_down_button.setEnabled(False)
 
         self.start_button = QPushButton("Set current pen position as page start")
         self.start_button.setEnabled(False)
@@ -201,6 +213,7 @@ class MainWindow(QMainWindow):
             f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
             f"{self.drawing.segments} segments")
         self.preview.set_drawing(self.drawing)
+        self.update_estimate()
         self.preview.set_start_ready(self.start_point.is_set)
         self.progress.setMaximum(self.drawing.segments)
         self.progress.setValue(0)
@@ -218,6 +231,8 @@ class MainWindow(QMainWindow):
             self.start_button.setEnabled(False)
             self.joystick_group.setEnabled(False)
             self.pen_button.setEnabled(False)
+            self.pen_up_button.setEnabled(False)
+            self.pen_down_button.setEnabled(False)
             self.status.setText("Disconnected")
             self.connect_button.setText("Connect")
             return
@@ -241,6 +256,16 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.joystick_group.setEnabled(True)
         self.pen_button.setEnabled(True)
+        self.pen_up_button.setEnabled(True)
+        self.pen_down_button.setEnabled(True)
+
+    def update_estimate(self):
+        if self.drawing is None:
+            return
+        seconds = estimate_seconds(self.drawing, STEPS_PER_MM,
+                                   SPEED_PRESETS[self.speed.currentText()],
+                                   self.geometry.currentData())
+        self.preview.set_estimate(seconds)
 
     def clear_start(self):
         self.start_point.clear()
@@ -281,6 +306,12 @@ class MainWindow(QMainWindow):
             return
         self.jog.stop()
         PenDialog(self.board, self).exec()
+
+    def move_pen(self, raised):
+        self.jog.stop()
+        self.board.wait_idle()
+        set_pen(self.board, raised)
+        self.board.wait_idle()
 
     def start_plot(self):
         if self.drawing is None:
@@ -394,6 +425,8 @@ class MainWindow(QMainWindow):
         self.return_button.setEnabled(not active and self.start_point.is_set and self.board.connected)
         self.joystick_group.setEnabled(not active and self.board.connected)
         self.pen_button.setEnabled(not active and self.board.connected)
+        self.pen_up_button.setEnabled(not active and self.board.connected)
+        self.pen_down_button.setEnabled(not active and self.board.connected)
         self.release_button.setEnabled(not active)
 
     def run(self, action):
