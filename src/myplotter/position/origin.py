@@ -11,6 +11,8 @@ class StartPoint:
 
     def capture(self, board):
         board.wait_idle()
+        board.command("EM,1,1")
+        board.wait_idle()
         self.steps = board.query_steps()
 
     def verify(self, board):

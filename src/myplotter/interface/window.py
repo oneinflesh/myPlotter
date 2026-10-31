@@ -1,16 +1,18 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QProgressDialog, QPushButton,
-                               QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from myplotter.connection.board import Board, discover_boards
-from myplotter.motion.control import jog, release_motors
+from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
+from myplotter.motion.control import release_motors
 from myplotter.pen.control import set_pen
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
+from myplotter.plot.return_job import ReturnJob
 from myplotter.position.origin import StartPoint
 from myplotter.svg.loader import SvgLoader
 from myplotter.svg.preview import DrawingPreview
@@ -26,6 +28,7 @@ class MainWindow(QMainWindow):
         self.filename = None
         self.loading_filename = None
         self.job = None
+        self.job_kind = None
         self.thread = None
         self.load_thread = None
         self.loader = None
@@ -79,15 +82,9 @@ class MainWindow(QMainWindow):
         self.geometry.addItem("Independent X/Y motors", "cartesian")
         self.geometry.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         plot_settings.addRow("Motor layout", self.geometry)
-        self.steps_per_mm = QDoubleSpinBox()
-        self.steps_per_mm.setRange(1, 1000)
-        self.steps_per_mm.setValue(80)
-        self.steps_per_mm.setSuffix(" steps/mm")
-        plot_settings.addRow("Calibration", self.steps_per_mm)
-        self.speed = QDoubleSpinBox()
-        self.speed.setRange(1, 50)
-        self.speed.setValue(10)
-        self.speed.setSuffix(" mm/s")
+        self.speed = QComboBox()
+        self.speed.addItems(SPEED_PRESETS)
+        self.speed.setCurrentText("Medium")
         plot_settings.addRow("Speed", self.speed)
         sidebar.addWidget(self.plot_group)
 
@@ -95,19 +92,27 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(False)
         self.start_button.clicked.connect(self.set_start_point)
         sidebar.addWidget(self.start_button)
-        self.start_label = QLabel("Place pen at the paper's top-left corner, then set start.")
+        self.start_label = QLabel("Release motors, place pen at the paper's top-left corner, then set start.")
         self.start_label.setWordWrap(True)
         sidebar.addWidget(self.start_label)
 
         plot_row = QHBoxLayout()
         self.plot_button = QPushButton("Start plot")
         self.plot_button.clicked.connect(self.start_plot)
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_plot)
         plot_row.addWidget(self.plot_button)
+        plot_row.addWidget(self.pause_button)
         plot_row.addWidget(self.stop_button)
         sidebar.addLayout(plot_row)
+        self.return_button = QPushButton("Back to Start")
+        self.return_button.setEnabled(False)
+        self.return_button.clicked.connect(self.back_to_start)
+        sidebar.addWidget(self.return_button)
         self.progress = QProgressBar()
         canvas.addWidget(self.progress)
         self.plot_status = QLabel("Ready")
@@ -121,29 +126,6 @@ class MainWindow(QMainWindow):
                 lambda: set_pen(self.board, up)))
             pen_row.addWidget(button)
         sidebar.addWidget(self.pen_group)
-
-        self.motion_group = QGroupBox("Manual movement")
-        motion_layout = QVBoxLayout(self.motion_group)
-        settings = QFormLayout()
-        self.steps = QSpinBox()
-        self.steps.setRange(1, 2000)
-        self.steps.setValue(100)
-        self.duration = QSpinBox()
-        self.duration.setRange(100, 10000)
-        self.duration.setValue(1000)
-        self.duration.setSuffix(" ms")
-        settings.addRow("Steps", self.steps)
-        settings.addRow("Time", self.duration)
-        motion_layout.addLayout(settings)
-        for axis in ("X", "Y"):
-            axis_row = QHBoxLayout()
-            for direction, sign in (("−", -1), ("+", 1)):
-                button = QPushButton(f"{axis} {direction}")
-                button.clicked.connect(lambda _checked=False, a=axis, s=sign: self.run(
-                    lambda: self.jog_axis(a, s * self.steps.value())))
-                axis_row.addWidget(button)
-            motion_layout.addLayout(axis_row)
-        sidebar.addWidget(self.motion_group)
 
         self.release_button = QPushButton("Release motors")
         self.release_button.clicked.connect(lambda: self.run(self.release_motors))
@@ -239,8 +221,9 @@ class MainWindow(QMainWindow):
 
     def clear_start(self):
         self.start_point.clear()
-        self.start_label.setText("Place pen at the paper's top-left corner, then set start.")
+        self.start_label.setText("Release motors, place pen at the paper's top-left corner, then set start.")
         self.preview.set_start_ready(False)
+        self.return_button.setEnabled(False)
 
     def set_start_point(self):
         try:
@@ -251,10 +234,7 @@ class MainWindow(QMainWindow):
         self.start_label.setText("Page start set at the pen's current position.")
         self.preview.set_start_ready(True)
         self.preview.set_head(0, 0, False)
-
-    def jog_axis(self, axis, steps):
-        self.clear_start()
-        jog(self.board, axis, steps, self.duration.value(), self.geometry.currentData())
+        self.return_button.setEnabled(True)
 
     def release_motors(self):
         self.clear_start()
@@ -277,14 +257,28 @@ class MainWindow(QMainWindow):
         self.preview.set_head(0, 0, False)
         self.progress.setValue(0)
         self.plot_status.setText("Plotting…")
+        self.job_kind = "plot"
+        self.job = PlotJob(self.board, self.drawing, STEPS_PER_MM,
+                           SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData(),
+                           self.start_point.steps)
+        self.job.progress.connect(self._plot_progress)
+        self.job.paused.connect(self._pause_changed)
+        self._start_worker()
+
+    def back_to_start(self):
+        if self.job is not None or not self.start_point.is_set or not self.board.connected:
+            return
+        self.plot_status.setText("Returning to start…")
+        self.job_kind = "return"
+        self.job = ReturnJob(self.board, self.start_point.steps, STEPS_PER_MM,
+                             SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData())
+        self._start_worker()
+
+    def _start_worker(self):
         self._set_plotting(True)
         self.thread = QThread(self)
-        self.job = PlotJob(self.board, self.drawing, self.steps_per_mm.value(),
-                           self.speed.value(), self.geometry.currentData(),
-                           self.start_point.steps)
         self.job.moveToThread(self.thread)
         self.thread.started.connect(self.job.run)
-        self.job.progress.connect(self._plot_progress)
         self.job.position_changed.connect(self.preview.set_head)
         self.job.finished.connect(self._plot_finished)
         self.job.finished.connect(self.thread.quit)
@@ -293,9 +287,28 @@ class MainWindow(QMainWindow):
         self.thread.finished.connect(self._plot_thread_finished)
         self.thread.start()
 
+    def toggle_pause(self):
+        if self.job_kind != "plot" or self.job is None:
+            return
+        if self.job.pause_event.is_set():
+            self.job.resume()
+            self.pause_button.setText("Pause")
+            self.plot_status.setText("Resuming…")
+        else:
+            self.job.pause()
+            self.pause_button.setText("Resume")
+            self.plot_status.setText("Pausing after current move…")
+
+    def _pause_changed(self, paused):
+        if self.job is None or self.job.stop_event.is_set():
+            return
+        self.pause_button.setText("Resume" if paused else "Pause")
+        self.plot_status.setText("Paused" if paused else "Plotting…")
+
     def stop_plot(self):
         if self.job is not None:
             self.job.stop()
+            self.pause_button.setEnabled(False)
             self.plot_status.setText("Stopping…")
 
     def _plot_progress(self, count):
@@ -306,15 +319,18 @@ class MainWindow(QMainWindow):
                                      f"({count / self.drawing.segments:.0%})")
 
     def _plot_finished(self, success, message):
-        self.plot_status.setText(message)
-        if not success:
-            self.clear_start()
+        if message == "Stopped":
+            self.plot_status.setText("Stopped | Back to Start is available")
+        else:
+            self.plot_status.setText(message)
         if not success and message != "Stopped":
+            self.clear_start()
             QMessageBox.critical(self, "Plot failed", message)
 
     def _plot_thread_finished(self):
         self.job = None
         self.thread = None
+        self.job_kind = None
         self._set_plotting(False)
         if self.close_pending:
             self.close()
@@ -327,9 +343,12 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(not active and self.board.connected)
         self.plot_group.setEnabled(not active)
         self.plot_button.setEnabled(not active)
+        self.pause_button.setEnabled(active and self.job_kind == "plot")
+        if not active:
+            self.pause_button.setText("Pause")
         self.stop_button.setEnabled(active)
+        self.return_button.setEnabled(not active and self.start_point.is_set and self.board.connected)
         self.pen_group.setEnabled(not active)
-        self.motion_group.setEnabled(not active)
         self.release_button.setEnabled(not active)
 
     def run(self, action):

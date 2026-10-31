@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 class PlotJob(QObject):
     progress = Signal(int)
     position_changed = Signal(float, float, bool)
+    paused = Signal(bool)
     finished = Signal(bool, str)
 
     def __init__(self, board, drawing, steps_per_mm, speed_mm_s, geometry,
@@ -21,9 +22,45 @@ class PlotJob(QObject):
         self.origin_steps = origin_steps
         self.pen_is_down = False
         self.stop_event = threading.Event()
+        self.pause_event = threading.Event()
+        self.resume_event = threading.Event()
+        self.resume_event.set()
 
     def stop(self):
         self.stop_event.set()
+        self.resume_event.set()
+
+    def pause(self):
+        self.pause_event.set()
+        self.resume_event.clear()
+
+    def resume(self):
+        self.pause_event.clear()
+        self.resume_event.set()
+
+    def _checkpoint(self):
+        if self.stop_event.is_set():
+            return False
+        if not self.pause_event.is_set():
+            return True
+        was_down = self.pen_is_down
+        if was_down:
+            self.board.command("SP,1,500")
+            self.board.wait_idle(self.stop_event.is_set)
+            self.pen_is_down = False
+            self._emit_actual_position()
+        self.paused.emit(True)
+        while self.pause_event.is_set() and not self.stop_event.is_set():
+            self.resume_event.wait(0.05)
+        if self.stop_event.is_set():
+            return False
+        if was_down:
+            self.board.command("SP,0,500")
+            self.board.wait_idle(self.stop_event.is_set)
+            self.pen_is_down = True
+            self._emit_actual_position()
+        self.paused.emit(False)
+        return not self.stop_event.is_set()
 
     @Slot()
     def run(self):
@@ -38,16 +75,18 @@ class PlotJob(QObject):
             self.board.command("SP,1,500")
             self.board.wait_idle(self.stop_event.is_set)
             for path in self.drawing.paths:
-                if self.stop_event.is_set():
+                if not self._checkpoint():
                     break
                 position = self._move(position, path[0])
+                if not self._checkpoint():
+                    break
                 self.board.command("SP,0,500")
                 pen_down = True
                 self.pen_is_down = True
                 self.position_changed.emit(position[0], position[1], True)
                 self.board.wait_idle(self.stop_event.is_set)
                 for point in path[1:]:
-                    if self.stop_event.is_set():
+                    if not self._checkpoint():
                         break
                     position = self._move(position, point)
                     if self.stop_event.is_set():
@@ -57,11 +96,12 @@ class PlotJob(QObject):
                     if now - last_update >= 0.05 or completed == self.drawing.segments:
                         self.progress.emit(completed)
                         last_update = now
-                self.board.command("SP,1,500")
-                pen_down = False
-                self.pen_is_down = False
-                self.position_changed.emit(position[0], position[1], False)
-                self.board.wait_idle(self.stop_event.is_set)
+                if not self.stop_event.is_set():
+                    self.board.command("SP,1,500")
+                    pen_down = False
+                    self.pen_is_down = False
+                    self.position_changed.emit(position[0], position[1], False)
+                    self.board.wait_idle(self.stop_event.is_set)
             if not self.stop_event.is_set():
                 position = self._move(position, (0, 0))
             self.progress.emit(completed)
@@ -83,7 +123,7 @@ class PlotJob(QObject):
         pieces = max(1, math.ceil(distance / 5))
         origin = position
         for index in range(1, pieces + 1):
-            if self.stop_event.is_set():
+            if not self._checkpoint():
                 break
             fraction = index / pieces
             next_point = (origin[0] + (target[0] - origin[0]) * fraction,
