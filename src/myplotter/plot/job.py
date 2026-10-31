@@ -4,6 +4,8 @@ import time
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from myplotter.pen.control import set_pen
+
 
 class PlotJob(QObject):
     progress = Signal(int)
@@ -45,7 +47,7 @@ class PlotJob(QObject):
             return True
         was_down = self.pen_is_down
         if was_down:
-            self.board.command("SP,1,500")
+            set_pen(self.board, True)
             self.board.wait_idle(self.stop_event.is_set)
             self.pen_is_down = False
             self._emit_actual_position()
@@ -55,7 +57,7 @@ class PlotJob(QObject):
         if self.stop_event.is_set():
             return False
         if was_down:
-            self.board.command("SP,0,500")
+            set_pen(self.board, False)
             self.board.wait_idle(self.stop_event.is_set)
             self.pen_is_down = True
             self._emit_actual_position()
@@ -72,7 +74,7 @@ class PlotJob(QObject):
         message = "Stopped"
         try:
             self.position_changed.emit(0.0, 0.0, False)
-            self.board.command("SP,1,500")
+            set_pen(self.board, True)
             self.board.wait_idle(self.stop_event.is_set)
             for path in self.drawing.paths:
                 if not self._checkpoint():
@@ -80,7 +82,7 @@ class PlotJob(QObject):
                 position = self._move(position, path[0])
                 if not self._checkpoint():
                     break
-                self.board.command("SP,0,500")
+                set_pen(self.board, False)
                 pen_down = True
                 self.pen_is_down = True
                 self.position_changed.emit(position[0], position[1], True)
@@ -97,7 +99,7 @@ class PlotJob(QObject):
                         self.progress.emit(completed)
                         last_update = now
                 if not self.stop_event.is_set():
-                    self.board.command("SP,1,500")
+                    set_pen(self.board, True)
                     pen_down = False
                     self.pen_is_down = False
                     self.position_changed.emit(position[0], position[1], False)
@@ -112,7 +114,7 @@ class PlotJob(QObject):
         finally:
             if pen_down and self.board.connected:
                 try:
-                    self.board.command("SP,1,500")
+                    set_pen(self.board, True)
                     self.pen_is_down = False
                 except Exception:
                     pass

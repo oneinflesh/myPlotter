@@ -3,6 +3,8 @@ import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from myplotter.pen.control import set_pen
+
 
 class ReturnJob(QObject):
     position_changed = Signal(float, float, bool)
@@ -25,7 +27,7 @@ class ReturnJob(QObject):
         success = False
         message = "Stopped"
         try:
-            self.board.command("SP,1,500")
+            set_pen(self.board, True)
             self.board.wait_idle(self.stop_event.is_set)
             current = self.board.query_steps()
             delta = (self.origin_steps[0] - current[0],

@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
 from myplotter.connection.board import Board, discover_boards
 from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
 from myplotter.motion.control import release_motors
-from myplotter.pen.control import set_pen
+from myplotter.pen.control import configure_pen, set_pen
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
 from myplotter.plot.return_job import ReturnJob
@@ -212,7 +212,9 @@ class MainWindow(QMainWindow):
             return
         try:
             version = self.board.connect(self.ports.currentText())
+            configure_pen(self.board)
         except Exception as error:
+            self.board.disconnect()
             QMessageBox.critical(self, "Connection failed", str(error))
             return
         self.status.setText(f"Connected: {version}")
