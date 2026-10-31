@@ -3,7 +3,8 @@ from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout,
                                QHBoxLayout, QLabel, QMessageBox, QPushButton,
                                QSpinBox, QVBoxLayout)
 
-from myplotter.pen.control import DEFAULT_DOWN, DEFAULT_UP, set_height, set_pen
+from myplotter.pen.control import (DEFAULT_DOWN, DEFAULT_UP,
+                                   migrate_pen_settings, set_height, set_pen)
 
 
 class PenDialog(QDialog):
@@ -11,6 +12,7 @@ class PenDialog(QDialog):
         super().__init__(parent)
         self.board = board
         self.settings = QSettings("MyPlotter", "MyPlotter")
+        migrate_pen_settings(self.settings)
         self.setWindowTitle("Pen Controllers")
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Adjust servo positions, then test each height."))

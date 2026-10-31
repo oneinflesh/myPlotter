@@ -11,7 +11,8 @@ from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
 from myplotter.motion.control import release_motors
 from myplotter.motion.jog import JogControl
 from myplotter.motion.joystick import Joystick
-from myplotter.pen.control import configure_pen, set_height, set_pen
+from myplotter.pen.control import (configure_pen, migrate_pen_settings,
+                                   set_height, set_pen)
 from myplotter.pen.dialog import PenDialog
 from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
@@ -243,6 +244,7 @@ class MainWindow(QMainWindow):
             version = self.board.connect(self.ports.currentText())
             configure_pen(self.board)
             settings = QSettings("MyPlotter", "MyPlotter")
+            migrate_pen_settings(settings)
             if settings.contains("pen/up"):
                 set_height(self.board, True, int(settings.value("pen/up")))
             if settings.contains("pen/down"):

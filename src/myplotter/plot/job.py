@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from myplotter.pen.control import PEN_SETTLE_MS, set_pen
+from myplotter.pen.control import pen_command, set_pen
 
 
 @dataclass(frozen=True)
@@ -141,11 +141,11 @@ class PlotJob(QObject):
     def _motions(self):
         position = (0.0, 0.0)
         deferred_progress = 0
-        yield Motion(f"SP,1,{PEN_SETTLE_MS}", position, False)
+        yield Motion(pen_command(True), position, False)
         for path in self.drawing.paths:
             yield from self._move(position, path[0], False)
             position = path[0]
-            yield Motion(f"SP,0,{PEN_SETTLE_MS}", position, True)
+            yield Motion(pen_command(False), position, True)
             for point in path[1:]:
                 pieces = list(self._move(position, point, True))
                 if pieces:
@@ -156,7 +156,7 @@ class PlotJob(QObject):
                 else:
                     deferred_progress += 1
                 position = point
-            yield Motion(f"SP,1,{PEN_SETTLE_MS}", position, False,
+            yield Motion(pen_command(True), position, False,
                          deferred_progress)
             deferred_progress = 0
         yield from self._move(position, (0.0, 0.0), False)

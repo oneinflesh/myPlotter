@@ -1,7 +1,7 @@
 PEN_SETTLE_MS = 180
 SERVO_RATE = 1000
-DEFAULT_UP = 12000
-DEFAULT_DOWN = 16000
+DEFAULT_UP = 16000
+DEFAULT_DOWN = 12000
 
 
 def configure_pen(board):
@@ -10,10 +10,25 @@ def configure_pen(board):
 
 
 def set_pen(board, raised):
-    board.command(f"SP,{1 if raised else 0},{PEN_SETTLE_MS}")
+    board.command(pen_command(raised))
+
+
+def pen_command(raised):
+    return f"SP,{0 if raised else 1},{PEN_SETTLE_MS}"
 
 
 def set_height(board, raised, value):
     if not 6000 <= value <= 24000:
         raise ValueError("Pen height must be between 6000 and 24000")
-    board.command(f"SC,{4 if raised else 5},{value}")
+    board.command(f"SC,{5 if raised else 4},{value}")
+
+
+def migrate_pen_settings(settings):
+    if settings.value("pen/direction_version", 1, type=int) >= 2:
+        return
+    if settings.contains("pen/up") or settings.contains("pen/down"):
+        previous_up = int(settings.value("pen/up", 12000))
+        previous_down = int(settings.value("pen/down", 16000))
+        settings.setValue("pen/up", previous_down)
+        settings.setValue("pen/down", previous_up)
+    settings.setValue("pen/direction_version", 2)
