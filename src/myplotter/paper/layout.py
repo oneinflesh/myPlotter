@@ -30,3 +30,9 @@ def fit_to_paper(drawing, size, margin_mm=10.0):
     paths = [[(x_offset + x * factor, y_offset + y * factor)
               for x, y in path] for path in drawing.paths]
     return Drawing(paths, page[0], page[1], drawing.skipped), factor
+
+
+def place_on_paper(source, page_width, page_height, scale, x, y):
+    paths = [[(x + px * scale, y + py * scale) for px, py in path]
+             for path in source.paths]
+    return Drawing(paths, page_width, page_height, source.skipped)

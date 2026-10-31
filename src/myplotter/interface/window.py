@@ -14,7 +14,7 @@ from myplotter.motion.joystick import Joystick
 from myplotter.pen.control import (configure_pen, migrate_pen_settings,
                                    set_height, set_pen)
 from myplotter.pen.dialog import PenDialog
-from myplotter.paper.layout import fit_to_paper
+from myplotter.paper.layout import fit_to_paper, place_on_paper
 from myplotter.plot.job import PlotJob
 from myplotter.plot.estimate import estimate_seconds
 from myplotter.plot.return_job import ReturnJob
@@ -33,6 +33,8 @@ class MainWindow(QMainWindow):
             self, "Joystick error", message))
         self.start_point = StartPoint()
         self.drawing = None
+        self.placement = None
+        self.drag_placement = None
         self.source_drawing = None
         self.filename = None
         self.loading_filename = None
@@ -77,7 +79,11 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.choose_button)
         self.file_label = QLabel("No SVG selected")
         canvas.addWidget(self.file_label)
+        canvas.addWidget(QLabel("Drag artwork to move; drag its blue corner to resize proportionally."))
         self.preview = DrawingPreview()
+        self.preview.interaction_started.connect(self._begin_transform)
+        self.preview.transform_requested.connect(self._transform_drawing)
+        self.preview.interaction_finished.connect(self._finish_transform)
         canvas.addWidget(self.preview, 1)
 
         self.plot_group = QGroupBox("Plot settings")
@@ -207,7 +213,11 @@ class MainWindow(QMainWindow):
     def apply_page(self):
         if self.source_drawing is None:
             return
-        self.drawing, factor = fit_to_paper(self.source_drawing, self.paper.currentText())
+        fitted, factor = fit_to_paper(self.source_drawing, self.paper.currentText())
+        x = min(point[0] for path in fitted.paths for point in path)
+        y = min(point[1] for path in fitted.paths for point in path)
+        self.placement = (x, y, factor)
+        self.drawing = fitted
         orientation = "portrait" if self.drawing.height_mm > self.drawing.width_mm else "landscape"
         self.file_label.setText(
             f"{Path(self.filename).name} | {self.paper.currentText()} {orientation} "
@@ -222,6 +232,42 @@ class MainWindow(QMainWindow):
         if self.drawing.skipped:
             notes.append(f"{self.drawing.skipped} text/image elements skipped")
         self.plot_status.setText(" | ".join(notes))
+
+    def _begin_transform(self):
+        if self.job is None and self.placement is not None:
+            self.drag_placement = self.placement
+
+    def _transform_drawing(self, mode, dx, dy):
+        if self.job is not None or self.drag_placement is None:
+            return
+        x, y, scale = self.drag_placement
+        source = self.source_drawing
+        page_width, page_height = self.drawing.width_mm, self.drawing.height_mm
+        if mode == "move":
+            x = max(0, min(page_width - source.width_mm * scale, x + dx))
+            y = max(0, min(page_height - source.height_mm * scale, y + dy))
+        else:
+            width_fraction = dx / source.width_mm if source.width_mm else 0
+            height_fraction = dy / source.height_mm if source.height_mm else 0
+            change = (width_fraction if abs(width_fraction) >= abs(height_fraction)
+                      else height_fraction)
+            maximum = min((page_width - x) / source.width_mm
+                          if source.width_mm else float("inf"),
+                          (page_height - y) / source.height_mm
+                          if source.height_mm else float("inf"))
+            scale = max(0.01, min(maximum, scale + change))
+        self.placement = (x, y, scale)
+        self.drawing = place_on_paper(source, page_width, page_height, scale, x, y)
+        self.preview.set_drawing(self.drawing)
+
+    def _finish_transform(self):
+        if self.drag_placement is None:
+            return
+        self.drag_placement = None
+        self.update_estimate()
+        x, y, scale = self.placement
+        self.plot_status.setText(f"Artwork placed at {x:.1f}, {y:.1f} mm | "
+                                 f"scale {scale:.0%}")
 
     def toggle_connection(self):
         if self.board.connected:
@@ -413,6 +459,7 @@ class MainWindow(QMainWindow):
             self.close()
 
     def _set_plotting(self, active):
+        self.preview.set_editable(not active)
         self.ports.setEnabled(not active)
         self.refresh_button.setEnabled(not active)
         self.connect_button.setEnabled(not active)
