@@ -1,4 +1,5 @@
 import serial
+import time
 from serial.tools import list_ports
 
 
@@ -46,3 +47,29 @@ class Board:
         response = self.port.readline().decode("ascii", errors="replace").strip()
         if response != "OK":
             raise RuntimeError(response or "Board did not acknowledge the command")
+
+    def wait_idle(self, stop_requested=None):
+        if not self.connected:
+            raise RuntimeError("Plotter disconnected")
+        while True:
+            self.port.write(b"QM\r")
+            response = self.port.readline().decode("ascii", errors="replace").strip()
+            parts = response.split(",")
+            if len(parts) != 5 or parts[0] != "QM":
+                raise RuntimeError(f"Unexpected motor status: {response or 'no response'}")
+            if all(value == "0" for value in parts[1:]):
+                return
+            if stop_requested is not None and stop_requested():
+                self.stop_motion()
+                return
+            time.sleep(0.04)
+
+    def stop_motion(self):
+        if not self.connected:
+            return
+        self.port.write(b"ES\r")
+        for _ in range(2):
+            response = self.port.readline().decode("ascii", errors="replace").strip()
+            if response == "OK":
+                return
+        raise RuntimeError("Board did not acknowledge stop")
