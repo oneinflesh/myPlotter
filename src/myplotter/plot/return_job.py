@@ -1,5 +1,7 @@
 import math
 import threading
+import time
+from collections import deque
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -35,6 +37,7 @@ class ReturnJob(QObject):
             distance = self._distance(*delta)
             pieces = max(1, math.ceil(distance / 5))
             previous = (0, 0)
+            pending = deque()
             for index in range(1, pieces + 1):
                 if self.stop_event.is_set():
                     break
@@ -49,8 +52,16 @@ class ReturnJob(QObject):
                                              / self.speed_mm_s))
                 if max(abs(first), abs(second)) / duration > 25:
                     raise ValueError("Return move exceeds board step rate")
+                while len(pending) >= 2 and not self.stop_event.is_set():
+                    self._drain(pending)
+                if self.stop_event.is_set():
+                    break
                 self.board.command(f"SM,{duration},{first},{second}")
-                self.board.wait_idle(self.stop_event.is_set, self._emit_position)
+                pending.append(target)
+            while pending and not self.stop_event.is_set():
+                self._drain(pending)
+            if self.stop_event.is_set():
+                self.board.stop_motion()
             if not self.stop_event.is_set():
                 self.board.wait_idle()
                 if self.board.query_steps() != self.origin_steps:
@@ -62,6 +73,14 @@ class ReturnJob(QObject):
             message = str(error)
         finally:
             self.finished.emit(success, message)
+
+    def _drain(self, pending):
+        active, queued = self.board.motion_status()
+        while len(pending) > int(active) + int(queued):
+            pending.popleft()
+        self._emit_position()
+        if pending:
+            time.sleep(0.004)
 
     def _distance(self, motor_1, motor_2):
         if self.geometry == "mixed":

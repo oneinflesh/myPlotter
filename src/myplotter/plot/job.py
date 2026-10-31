@@ -1,10 +1,20 @@
 import math
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from myplotter.pen.control import set_pen
+from myplotter.pen.control import PEN_SETTLE_MS, set_pen
+
+
+@dataclass(frozen=True)
+class Motion:
+    command: str
+    position: tuple[float, float]
+    pen_down: bool
+    progress: int = 0
 
 
 class PlotJob(QObject):
@@ -40,11 +50,75 @@ class PlotJob(QObject):
         self.pause_event.clear()
         self.resume_event.set()
 
-    def _checkpoint(self):
-        if self.stop_event.is_set():
-            return False
-        if not self.pause_event.is_set():
-            return True
+    @Slot()
+    def run(self):
+        completed = 0
+        pending = deque()
+        motions = iter(self._motions())
+        exhausted = False
+        success = False
+        message = "Stopped"
+        last_position_update = 0.0
+        try:
+            self.position_changed.emit(0.0, 0.0, False)
+            while not self.stop_event.is_set():
+                active, queued = self.board.motion_status()
+                in_board = int(active) + int(queued)
+                if in_board > len(pending):
+                    raise RuntimeError("Board motion queue changed unexpectedly")
+                while len(pending) > in_board:
+                    motion = pending.popleft()
+                    self.pen_is_down = motion.pen_down
+                    completed += motion.progress
+                    if motion.progress:
+                        self.progress.emit(completed)
+                    self.position_changed.emit(*motion.position, self.pen_is_down)
+
+                now = time.monotonic()
+                if now - last_position_update >= 0.05:
+                    self._emit_actual_position()
+                    last_position_update = now
+
+                if self.pause_event.is_set() and not pending:
+                    if not self._wait_while_paused():
+                        break
+
+                while (not exhausted and not self.pause_event.is_set()
+                       and not self.stop_event.is_set() and len(pending) < 2):
+                    try:
+                        motion = next(motions)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    self.board.command(motion.command)
+                    pending.append(motion)
+
+                if exhausted and not pending:
+                    self.progress.emit(completed)
+                    success = True
+                    message = "Complete"
+                    break
+                if pending:
+                    time.sleep(0.004)
+        except Exception as error:
+            message = str(error)
+        finally:
+            if not success and self.board.connected:
+                try:
+                    self.board.stop_motion()
+                except Exception:
+                    pass
+            if self.board.connected:
+                try:
+                    set_pen(self.board, True)
+                    self.board.wait_idle()
+                    self.pen_is_down = False
+                    self._emit_actual_position()
+                except Exception:
+                    pass
+            self.finished.emit(success, message)
+
+    def _wait_while_paused(self):
         was_down = self.pen_is_down
         if was_down:
             set_pen(self.board, True)
@@ -64,96 +138,52 @@ class PlotJob(QObject):
         self.paused.emit(False)
         return not self.stop_event.is_set()
 
-    @Slot()
-    def run(self):
-        completed = 0
-        position = (0, 0)
-        pen_down = False
-        last_update = 0.0
-        success = False
-        message = "Stopped"
-        try:
-            self.position_changed.emit(0.0, 0.0, False)
-            set_pen(self.board, True)
-            self.board.wait_idle(self.stop_event.is_set)
-            for path in self.drawing.paths:
-                if not self._checkpoint():
-                    break
-                position = self._move(position, path[0])
-                if not self._checkpoint():
-                    break
-                set_pen(self.board, False)
-                pen_down = True
-                self.pen_is_down = True
-                self.position_changed.emit(position[0], position[1], True)
-                self.board.wait_idle(self.stop_event.is_set)
-                for point in path[1:]:
-                    if not self._checkpoint():
-                        break
-                    position = self._move(position, point)
-                    if self.stop_event.is_set():
-                        break
-                    completed += 1
-                    now = time.monotonic()
-                    if now - last_update >= 0.05 or completed == self.drawing.segments:
-                        self.progress.emit(completed)
-                        last_update = now
-                if not self.stop_event.is_set():
-                    set_pen(self.board, True)
-                    pen_down = False
-                    self.pen_is_down = False
-                    self.position_changed.emit(position[0], position[1], False)
-                    self.board.wait_idle(self.stop_event.is_set)
-            if not self.stop_event.is_set():
-                position = self._move(position, (0, 0))
-            self.progress.emit(completed)
-            success = not self.stop_event.is_set()
-            message = "Complete" if success else "Stopped"
-        except Exception as error:
-            message = str(error)
-        finally:
-            if pen_down and self.board.connected:
-                try:
-                    set_pen(self.board, True)
-                    self.pen_is_down = False
-                except Exception:
-                    pass
-            self.finished.emit(success, message)
+    def _motions(self):
+        position = (0.0, 0.0)
+        deferred_progress = 0
+        yield Motion(f"SP,1,{PEN_SETTLE_MS}", position, False)
+        for path in self.drawing.paths:
+            yield from self._move(position, path[0], False)
+            position = path[0]
+            yield Motion(f"SP,0,{PEN_SETTLE_MS}", position, True)
+            for point in path[1:]:
+                pieces = list(self._move(position, point, True))
+                if pieces:
+                    pieces[-1] = Motion(pieces[-1].command, pieces[-1].position,
+                                        True, deferred_progress + 1)
+                    deferred_progress = 0
+                    yield from pieces
+                else:
+                    deferred_progress += 1
+                position = point
+            yield Motion(f"SP,1,{PEN_SETTLE_MS}", position, False,
+                         deferred_progress)
+            deferred_progress = 0
+        yield from self._move(position, (0.0, 0.0), False)
 
-    def _move(self, position, target):
+    def _move(self, position, target, pen_down):
         distance = math.hypot(target[0] - position[0], target[1] - position[1])
         pieces = max(1, math.ceil(distance / 5))
         origin = position
         for index in range(1, pieces + 1):
-            if not self._checkpoint():
-                break
             fraction = index / pieces
             next_point = (origin[0] + (target[0] - origin[0]) * fraction,
                           origin[1] + (target[1] - origin[1]) * fraction)
-            self._move_piece(position, next_point)
+            old = tuple(round(value * self.steps_per_mm) for value in position)
+            new = tuple(round(value * self.steps_per_mm) for value in next_point)
+            dx, dy = new[0] - old[0], new[1] - old[1]
+            if dx or dy:
+                duration = max(10, math.ceil(1000 * math.hypot(
+                    next_point[0] - position[0], next_point[1] - position[1])
+                    / self.speed_mm_s))
+                motor_steps = ((dx + dy, dx - dy) if self.geometry == "mixed"
+                               else (dx, dy))
+                if any(abs(value) / duration > 25 for value in motor_steps):
+                    raise ValueError("Move exceeds board step rate; lower the speed")
+                command = (f"XM,{duration},{dx},{dy}" if self.geometry == "mixed"
+                           else f"SM,{duration},{dx},{dy}")
+                yield Motion(command, next_point, pen_down)
             position = next_point
-        return position
-
-    def _move_piece(self, position, target):
-        old = tuple(round(value * self.steps_per_mm) for value in position)
-        new = tuple(round(value * self.steps_per_mm) for value in target)
-        dx, dy = new[0] - old[0], new[1] - old[1]
-        if dx == 0 and dy == 0:
-            return
-        distance = math.hypot(target[0] - position[0], target[1] - position[1])
-        duration = max(10, math.ceil(1000 * distance / self.speed_mm_s))
-        if self.geometry == "mixed":
-            motor_steps = (dx + dy, dx - dy)
-            command = f"XM,{duration},{dx},{dy}"
-        else:
-            motor_steps = (dx, dy)
-            command = f"SM,{duration},{dx},{dy}"
-        if any(abs(value) / duration > 25 for value in motor_steps):
-            raise ValueError("Move exceeds board step rate; lower the speed")
-        self.board.command(command)
-        self.board.wait_idle(self.stop_event.is_set, self._emit_actual_position)
-        if not self.stop_event.is_set():
-            self.position_changed.emit(target[0], target[1], self.pen_is_down)
 
     def _emit_actual_position(self):
         motor_1, motor_2 = self.board.query_steps()

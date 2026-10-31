@@ -60,19 +60,29 @@ class Board:
         if not self.connected:
             raise RuntimeError("Plotter disconnected")
         while True:
-            self.port.write(b"QM\r")
-            response = _read_line(self.port)
-            parts = response.split(",")
-            if len(parts) != 5 or parts[0] != "QM":
-                raise RuntimeError(f"Unexpected motor status: {response or 'no response'}")
+            active, queued = self.motion_status()
             if on_poll is not None:
                 on_poll()
-            if all(value == "0" for value in parts[1:]):
+            if not active and not queued:
                 return
             if stop_requested is not None and stop_requested():
                 self.stop_motion()
                 return
             time.sleep(0.04)
+
+    def motion_status(self):
+        if not self.connected:
+            raise RuntimeError("Plotter disconnected")
+        self.port.write(b"QM\r")
+        response = _read_line(self.port)
+        parts = response.split(",")
+        if len(parts) != 5 or parts[0] != "QM":
+            raise RuntimeError(f"Unexpected motor status: {response or 'no response'}")
+        try:
+            values = [int(value) for value in parts[1:]]
+        except ValueError as error:
+            raise RuntimeError(f"Unexpected motor status: {response}") from error
+        return values[0] != 0, values[3] != 0
 
     def stop_motion(self):
         if not self.connected:
