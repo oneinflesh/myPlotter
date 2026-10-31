@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 
-from svgelements import Close, Move, Path, SVG, Shape
+from svgelements import Close, Line, Move, Path, SVG, Shape
 
 
 Point = tuple[float, float]
@@ -42,7 +42,8 @@ def load_svg(filename):
             if not current:
                 current = [_point(segment.start)]
             length = segment.length(error=1e-3)
-            samples = max(1, math.ceil(length / 8))
+            samples = (1 if isinstance(segment, (Line, Close)) else
+                       max(1, math.ceil(length)))
             if samples > 10000:
                 raise ValueError("SVG curve is too complex")
             for index in range(1, samples + 1):
