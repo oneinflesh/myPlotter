@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from myplotter.connection.board import Board, discover_boards
-from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
+from myplotter.machine.profile import PLOT_SPEED_MM_S, STEPS_PER_MM
 from myplotter.motion.control import release_motors
 from myplotter.motion.jog import JogControl
 from myplotter.motion.joystick import Joystick
@@ -97,11 +97,6 @@ class MainWindow(QMainWindow):
         self.geometry.addItem("Independent X/Y motors", "cartesian")
         self.geometry.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         plot_settings.addRow("Motor layout", self.geometry)
-        self.speed = QComboBox()
-        self.speed.addItems(SPEED_PRESETS)
-        self.speed.setCurrentText("Medium")
-        self.speed.currentTextChanged.connect(self.update_estimate)
-        plot_settings.addRow("Speed", self.speed)
         sidebar.addWidget(self.plot_group)
 
         self.joystick_group = QGroupBox("Position joystick")
@@ -214,8 +209,8 @@ class MainWindow(QMainWindow):
         if self.source_drawing is None:
             return
         fitted, factor = fit_to_paper(self.source_drawing, self.paper.currentText())
-        x = min(point[0] for path in fitted.paths for point in path)
-        y = min(point[1] for path in fitted.paths for point in path)
+        x = (fitted.width_mm - self.source_drawing.width_mm * factor) / 2
+        y = (fitted.height_mm - self.source_drawing.height_mm * factor) / 2
         self.placement = (x, y, factor)
         self.drawing = fitted
         orientation = "portrait" if self.drawing.height_mm > self.drawing.width_mm else "landscape"
@@ -255,7 +250,7 @@ class MainWindow(QMainWindow):
                           if source.width_mm else float("inf"),
                           (page_height - y) / source.height_mm
                           if source.height_mm else float("inf"))
-            scale = max(0.01, min(maximum, scale + change))
+            scale = max(min(0.01, maximum), min(maximum, scale + change))
         self.placement = (x, y, scale)
         self.drawing = place_on_paper(source, page_width, page_height, scale, x, y)
         self.preview.set_drawing(self.drawing)
@@ -310,8 +305,7 @@ class MainWindow(QMainWindow):
     def update_estimate(self):
         if self.drawing is None:
             return
-        seconds = estimate_seconds(self.drawing, STEPS_PER_MM,
-                                   SPEED_PRESETS[self.speed.currentText()],
+        seconds = estimate_seconds(self.drawing, STEPS_PER_MM, PLOT_SPEED_MM_S,
                                    self.geometry.currentData())
         self.preview.set_estimate(seconds)
 
@@ -380,7 +374,7 @@ class MainWindow(QMainWindow):
         self.plot_status.setText("Plotting…")
         self.job_kind = "plot"
         self.job = PlotJob(self.board, self.drawing, STEPS_PER_MM,
-                           SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData(),
+                           PLOT_SPEED_MM_S, self.geometry.currentData(),
                            self.start_point.steps)
         self.job.progress.connect(self._plot_progress)
         self.job.paused.connect(self._pause_changed)
@@ -392,7 +386,7 @@ class MainWindow(QMainWindow):
         self.plot_status.setText("Returning to start…")
         self.job_kind = "return"
         self.job = ReturnJob(self.board, self.start_point.steps, STEPS_PER_MM,
-                             SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData())
+                             PLOT_SPEED_MM_S, self.geometry.currentData())
         self._start_worker()
 
     def _start_worker(self):

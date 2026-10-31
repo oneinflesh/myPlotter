@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal, Slot
 
 from myplotter.motion.trajectory import plan_path
 from myplotter.pen.control import pen_command, set_pen
+from myplotter.plot.validation import validate_drawing
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,7 @@ class PlotJob(QObject):
         return not self.stop_event.is_set()
 
     def _motions(self):
+        validate_drawing(self.drawing)
         position = (0.0, 0.0)
         yield Motion(pen_command(True), position, False)
         for path in self.drawing.paths:

@@ -1,11 +1,12 @@
 import math
 from dataclasses import dataclass, replace
 
+from myplotter.machine.profile import ACCELERATION_MM_S2, PLOT_SPEED_MM_S
 
-ACCELERATION_MM_S2 = 400.0
-JUNCTION_TOLERANCE_MM = 0.03
-MIN_COMMAND_SECONDS = 0.01
-SLICE_SECONDS = 0.02
+
+JUNCTION_TOLERANCE_MM = 0.005
+MIN_COMMAND_SECONDS = 0.02
+SLICE_SECONDS = 0.03
 
 
 @dataclass(frozen=True)
@@ -19,7 +20,7 @@ class Move:
         dx, dy = self.delta_steps
         motors = (dx + dy, dx - dy) if geometry == "mixed" else (dx, dy)
         if any(abs(value) / self.duration_ms > 25 for value in motors):
-            raise ValueError("Move exceeds board step rate; lower the speed")
+            raise ValueError("Move exceeds the board step rate")
         name = "XM" if geometry == "mixed" else "SM"
         return f"{name},{self.duration_ms},{dx},{dy}"
 
@@ -28,6 +29,7 @@ def plan_path(points, steps_per_mm, speed_mm_s):
     """Keep the path coordinates while limiting speed changes at its vertices."""
     if steps_per_mm <= 0 or speed_mm_s <= 0:
         raise ValueError("Steps per mm and speed must be positive")
+    speed_mm_s = min(speed_mm_s, PLOT_SPEED_MM_S)
     vertices = [tuple(round(value * steps_per_mm) for value in point)
                 for point in points]
     segments = []
@@ -110,7 +112,8 @@ def _segment_moves(start, end, length, steps_per_mm, maximum, entry, exit_speed)
             continue
         delta = (target[0] - previous[0], target[1] - previous[1])
         minimum_ms = math.ceil(1000 * math.hypot(*delta) / (steps_per_mm * maximum))
-        moves.append(Move(max(10, minimum_ms, time_ms - previous_time_ms), delta,
+        moves.append(Move(max(round(MIN_COMMAND_SECONDS * 1000), minimum_ms,
+                              time_ms - previous_time_ms), delta,
                           (target[0] / steps_per_mm, target[1] / steps_per_mm)))
         previous, previous_time_ms = target, time_ms
     trailing_ms = round(duration * 1000) - previous_time_ms
