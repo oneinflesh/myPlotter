@@ -1,16 +1,17 @@
 from pathlib import Path
 
-from PySide6.QtCore import QThread
+from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton, QSpinBox,
-                               QVBoxLayout, QWidget)
+                               QMessageBox, QProgressBar, QProgressDialog, QPushButton,
+                               QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
 
 from myplotter.connection.board import Board, discover_boards
 from myplotter.motion.control import jog, release_motors
 from myplotter.pen.control import set_pen
+from myplotter.paper.layout import fit_to_paper
 from myplotter.plot.job import PlotJob
-from myplotter.svg.document import load_svg
+from myplotter.svg.loader import SvgLoader
 from myplotter.svg.preview import DrawingPreview
 
 
@@ -19,13 +20,31 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.board = Board()
         self.drawing = None
+        self.source_drawing = None
+        self.filename = None
+        self.loading_filename = None
         self.job = None
         self.thread = None
+        self.load_thread = None
+        self.loader = None
+        self.load_dialog = None
         self.close_pending = False
         self.setWindowTitle("My Plotter")
-        self.setMinimumWidth(560)
+        self.setMinimumSize(760, 500)
 
-        root = QVBoxLayout()
+        root = QHBoxLayout()
+        sidebar = QVBoxLayout()
+        sidebar_widget = QWidget()
+        sidebar_widget.setLayout(sidebar)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumWidth(350)
+        scroll.setMaximumWidth(460)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(sidebar_widget)
+        root.addWidget(scroll)
+        canvas = QVBoxLayout()
+        root.addLayout(canvas, 1)
         self.ports = QComboBox()
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh_ports)
@@ -35,24 +54,28 @@ class MainWindow(QMainWindow):
         row.addWidget(self.ports)
         row.addWidget(self.refresh_button)
         row.addWidget(self.connect_button)
-        root.addLayout(row)
+        sidebar.addLayout(row)
         self.status = QLabel("Disconnected")
-        root.addWidget(self.status)
+        sidebar.addWidget(self.status)
 
         self.choose_button = QPushButton("Choose SVG…")
         self.choose_button.clicked.connect(self.choose_svg)
-        root.addWidget(self.choose_button)
+        sidebar.addWidget(self.choose_button)
         self.file_label = QLabel("No SVG selected")
-        root.addWidget(self.file_label)
+        canvas.addWidget(self.file_label)
         self.preview = DrawingPreview()
-        root.addWidget(self.preview, 1)
+        canvas.addWidget(self.preview, 1)
 
         self.plot_group = QGroupBox("Plot settings")
         plot_settings = QFormLayout(self.plot_group)
+        self.paper = QComboBox()
+        self.paper.addItems(("A4", "A3", "A2"))
+        self.paper.currentTextChanged.connect(self.apply_page)
+        plot_settings.addRow("Paper", self.paper)
         self.geometry = QComboBox()
-        self.geometry.addItem("Select motor layout…", None)
+        self.geometry.addItem("CoreXY / AxiDraw", "mixed")
         self.geometry.addItem("Independent X/Y motors", "cartesian")
-        self.geometry.addItem("AxiDraw / CoreXY mixed axes", "mixed")
+        self.geometry.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         plot_settings.addRow("Motor layout", self.geometry)
         self.steps_per_mm = QDoubleSpinBox()
         self.steps_per_mm.setRange(1, 1000)
@@ -64,17 +87,7 @@ class MainWindow(QMainWindow):
         self.speed.setValue(10)
         self.speed.setSuffix(" mm/s")
         plot_settings.addRow("Speed", self.speed)
-        self.max_width = QSpinBox()
-        self.max_width.setRange(1, 1000)
-        self.max_width.setValue(200)
-        self.max_width.setSuffix(" mm")
-        plot_settings.addRow("Max width", self.max_width)
-        self.max_height = QSpinBox()
-        self.max_height.setRange(1, 1000)
-        self.max_height.setValue(200)
-        self.max_height.setSuffix(" mm")
-        plot_settings.addRow("Max height", self.max_height)
-        root.addWidget(self.plot_group)
+        sidebar.addWidget(self.plot_group)
 
         plot_row = QHBoxLayout()
         self.plot_button = QPushButton("Start plot")
@@ -84,11 +97,11 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_plot)
         plot_row.addWidget(self.plot_button)
         plot_row.addWidget(self.stop_button)
-        root.addLayout(plot_row)
+        sidebar.addLayout(plot_row)
         self.progress = QProgressBar()
-        root.addWidget(self.progress)
+        canvas.addWidget(self.progress)
         self.plot_status = QLabel("Ready")
-        root.addWidget(self.plot_status)
+        canvas.addWidget(self.plot_status)
 
         self.pen_group = QGroupBox("Pen")
         pen_row = QHBoxLayout(self.pen_group)
@@ -97,7 +110,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(lambda _checked=False, up=raised: self.run(
                 lambda: set_pen(self.board, up)))
             pen_row.addWidget(button)
-        root.addWidget(self.pen_group)
+        sidebar.addWidget(self.pen_group)
 
         self.motion_group = QGroupBox("Manual movement")
         motion_layout = QVBoxLayout(self.motion_group)
@@ -120,11 +133,12 @@ class MainWindow(QMainWindow):
                     lambda: jog(self.board, a, s * self.steps.value(), self.duration.value())))
                 axis_row.addWidget(button)
             motion_layout.addLayout(axis_row)
-        root.addWidget(self.motion_group)
+        sidebar.addWidget(self.motion_group)
 
         self.release_button = QPushButton("Release motors")
         self.release_button.clicked.connect(lambda: self.run(lambda: release_motors(self.board)))
-        root.addWidget(self.release_button)
+        sidebar.addWidget(self.release_button)
+        sidebar.addStretch()
         container = QWidget()
         container.setLayout(root)
         self.setCentralWidget(container)
@@ -138,19 +152,59 @@ class MainWindow(QMainWindow):
         filename, _ = QFileDialog.getOpenFileName(self, "Choose SVG", "", "SVG files (*.svg)")
         if not filename:
             return
-        try:
-            drawing = load_svg(filename)
-        except Exception as error:
-            QMessageBox.critical(self, "SVG error", str(error))
+        self.loading_filename = filename
+        self.choose_button.setEnabled(False)
+        self.load_dialog = QProgressDialog("Loading SVG…", "", 0, 0, self)
+        self.load_dialog.setCancelButton(None)
+        self.load_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.load_dialog.setMinimumDuration(0)
+        self.load_dialog.show()
+        self.load_thread = QThread(self)
+        self.loader = SvgLoader(filename)
+        self.loader.moveToThread(self.load_thread)
+        self.load_thread.started.connect(self.loader.run)
+        self.loader.loaded.connect(self._svg_loaded)
+        self.loader.loaded.connect(self.load_thread.quit)
+        self.load_thread.finished.connect(self.loader.deleteLater)
+        self.load_thread.finished.connect(self.load_thread.deleteLater)
+        self.load_thread.finished.connect(self._svg_thread_finished)
+        self.load_thread.start()
+
+    def _svg_loaded(self, drawing, error):
+        self.load_dialog.close()
+        self.load_dialog = None
+        if error:
+            self.loading_filename = None
+            QMessageBox.critical(self, "SVG error", error)
             return
-        self.drawing = drawing
-        self.file_label.setText(f"{Path(filename).name} · {drawing.width_mm:.1f} × "
-                                f"{drawing.height_mm:.1f} mm · {drawing.segments} segments")
-        self.preview.set_drawing(drawing)
-        self.progress.setMaximum(drawing.segments)
+        self.filename = self.loading_filename
+        self.loading_filename = None
+        self.source_drawing = drawing
+        self.apply_page()
+
+    def _svg_thread_finished(self):
+        self.loader = None
+        self.load_thread = None
+        self.choose_button.setEnabled(True)
+        if self.close_pending:
+            self.close()
+
+    def apply_page(self):
+        if self.source_drawing is None:
+            return
+        self.drawing, factor = fit_to_paper(self.source_drawing, self.paper.currentText())
+        orientation = "portrait" if self.drawing.height_mm > self.drawing.width_mm else "landscape"
+        self.file_label.setText(
+            f"{Path(self.filename).name} | {self.paper.currentText()} {orientation} "
+            f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
+            f"{self.drawing.segments} segments")
+        self.preview.set_drawing(self.drawing)
+        self.progress.setMaximum(self.drawing.segments)
         self.progress.setValue(0)
-        self.plot_status.setText(f"Ready · {drawing.skipped} text/image elements skipped"
-                                 if drawing.skipped else "Ready")
+        notes = [f"Ready | artwork at {factor:.0%} scale | 10 mm margin"]
+        if self.drawing.skipped:
+            notes.append(f"{self.drawing.skipped} text/image elements skipped")
+        self.plot_status.setText(" | ".join(notes))
 
     def toggle_connection(self):
         if self.board.connected:
@@ -175,13 +229,6 @@ class MainWindow(QMainWindow):
             return
         if not self.board.connected:
             QMessageBox.warning(self, "Plotter", "Connect the EiBotBoard first.")
-            return
-        if self.geometry.currentData() is None:
-            QMessageBox.warning(self, "Plotter", "Select the motor layout before plotting.")
-            return
-        if (self.drawing.width_mm > self.max_width.value() or
-                self.drawing.height_mm > self.max_height.value()):
-            QMessageBox.warning(self, "Plotter", "SVG exceeds the configured travel area.")
             return
         self.preview.set_completed(0)
         self.progress.setValue(0)
@@ -240,7 +287,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Plotter error", str(error))
 
     def closeEvent(self, event):
-        if self.thread is not None:
+        if self.thread is not None or self.load_thread is not None:
             self.stop_plot()
             self.close_pending = True
             event.ignore()

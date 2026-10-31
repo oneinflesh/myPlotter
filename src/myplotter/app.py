@@ -8,7 +8,7 @@ from myplotter.interface.window import MainWindow
 def main():
     app = QApplication(sys.argv)
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     return app.exec()
 
 
