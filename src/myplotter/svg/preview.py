@@ -3,6 +3,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from myplotter.plot.estimate import format_duration
+from myplotter.svg.render import PreviewPaths
 
 
 class DrawingPreview(QWidget):
@@ -13,6 +14,7 @@ class DrawingPreview(QWidget):
     def __init__(self):
         super().__init__()
         self.drawing = None
+        self.paths = None
         self.completed = 0
         self.head = None
         self.pen_down = False
@@ -25,6 +27,7 @@ class DrawingPreview(QWidget):
 
     def set_drawing(self, drawing):
         self.drawing = drawing
+        self.paths = PreviewPaths(drawing)
         self.completed = 0
         self.head = None
         self.update()
@@ -36,7 +39,9 @@ class DrawingPreview(QWidget):
         self.update()
 
     def set_completed(self, count):
-        self.completed = count
+        if self.paths is not None:
+            self.paths.set_completed(count)
+            self.completed = self.paths.completed
         self.update()
 
     def set_estimate(self, seconds):
@@ -59,12 +64,10 @@ class DrawingPreview(QWidget):
                       self.drawing.height_mm * scale), scale
 
     def _art_rect(self, page, scale):
-        xs = [x for path in self.drawing.paths for x, _ in path]
-        ys = [y for path in self.drawing.paths for _, y in path]
-        return QRectF(page.left() + min(xs) * scale,
-                      page.top() + min(ys) * scale,
-                      (max(xs) - min(xs)) * scale,
-                      (max(ys) - min(ys)) * scale)
+        bounds = self.paths.bounds
+        return QRectF(page.left() + bounds.left() * scale,
+                      page.top() + bounds.top() * scale,
+                      bounds.width() * scale, bounds.height() * scale)
 
     def mousePressEvent(self, event):
         if not self.editable or self.drawing is None or event.button() != Qt.MouseButton.LeftButton:
@@ -122,23 +125,8 @@ class DrawingPreview(QWidget):
         def screen(point):
             return QPointF(left + point[0] * scale, top + point[1] * scale)
 
-        painter.setPen(QPen(QColor("#aeb7c2"), 2, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap))
-        for path in self.drawing.paths:
-            for start, end in zip(path, path[1:]):
-                painter.drawLine(screen(start), screen(end))
-
-        painter.setPen(QPen(QColor("#09a66d"), 4, Qt.PenStyle.SolidLine,
-                            Qt.PenCapStyle.RoundCap))
-        remaining = self.completed
-        for path in self.drawing.paths:
-            for start, end in zip(path, path[1:]):
-                if remaining <= 0:
-                    break
-                painter.drawLine(screen(start), screen(end))
-                remaining -= 1
-            if remaining <= 0:
-                break
+        for layer in self.paths.images(self.size(), left, top, scale):
+            painter.drawImage(0, 0, layer)
 
         if self.editable:
             art = self._art_rect(page, scale)
@@ -162,7 +150,7 @@ class DrawingPreview(QWidget):
             painter.setBrush(QColor("#e5484d") if self.pen_down else QColor("#ff9f1a"))
             painter.drawEllipse(head, 9, 9)
 
-        percent = round(100 * self.completed / self.drawing.segments)
+        percent = round(100 * self.completed / self.paths.total)
         estimate = (f"  |  Estimated time: {format_duration(self.estimated_seconds)}"
                     if self.estimated_seconds is not None else "")
         painter.setPen(QColor("#152238"))

@@ -371,12 +371,14 @@ class MainWindow(QMainWindow):
         self.preview.set_completed(0)
         self.preview.set_head(0, 0, False)
         self.progress.setValue(0)
-        self.plot_status.setText("Plotting…")
+        self.progress.setRange(0, 0)
+        self.plot_status.setText("Preparing drawing segments…")
         self.job_kind = "plot"
         self.job = PlotJob(self.board, self.drawing, STEPS_PER_MM,
                            PLOT_SPEED_MM_S, self.geometry.currentData(),
-                           self.start_point.steps)
+                           self.start_point.steps, source_filename=self.filename or "manual")
         self.job.progress.connect(self._plot_progress)
+        self.job.prepared.connect(self._plot_prepared)
         self.job.paused.connect(self._pause_changed)
         self._start_worker()
 
@@ -386,7 +388,8 @@ class MainWindow(QMainWindow):
         self.plot_status.setText("Returning to start…")
         self.job_kind = "return"
         self.job = ReturnJob(self.board, self.start_point.steps, STEPS_PER_MM,
-                             PLOT_SPEED_MM_S, self.geometry.currentData())
+                             PLOT_SPEED_MM_S, self.geometry.currentData(),
+                             source_filename=self.filename or "manual")
         self._start_worker()
 
     def _start_worker(self):
@@ -428,6 +431,11 @@ class MainWindow(QMainWindow):
             self.pause_button.setEnabled(False)
             self.plot_status.setText("Stopping…")
 
+    def _plot_prepared(self):
+        self.progress.setRange(0, self.drawing.segments)
+        self.progress.setValue(0)
+        self.plot_status.setText("Plotting…")
+
     def _plot_progress(self, count):
         self.progress.setValue(count)
         self.preview.set_completed(count)
@@ -436,6 +444,8 @@ class MainWindow(QMainWindow):
                                      f"({count / self.drawing.segments:.0%})")
 
     def _plot_finished(self, success, message):
+        if self.job_kind == "plot" and self.drawing is not None:
+            self.progress.setRange(0, self.drawing.segments)
         if message == "Stopped":
             self.plot_status.setText("Stopped | Back to Start is available")
         else:

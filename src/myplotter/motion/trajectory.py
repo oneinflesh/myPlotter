@@ -7,6 +7,8 @@ from myplotter.machine.profile import ACCELERATION_MM_S2, PLOT_SPEED_MM_S
 JUNCTION_TOLERANCE_MM = 0.005
 MIN_COMMAND_SECONDS = 0.02
 SLICE_SECONDS = 0.03
+CRUISE_SECONDS = 0.12
+STREAM_MIN_SECONDS = 0.02
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,8 @@ def plan_path(points, steps_per_mm, speed_mm_s):
         start, end, length, count = segments[-1]
         segments[-1] = (start, end, length, count + skipped)
 
-    caps = [min(speed_mm_s, segment[2] / MIN_COMMAND_SECONDS)
+    minimum_duration = max(MIN_COMMAND_SECONDS, STREAM_MIN_SECONDS)
+    caps = [min(speed_mm_s, segment[2] / minimum_duration)
             for segment in segments]
     speeds = [0.0] * (len(segments) + 1)
     for index in range(1, len(segments)):
@@ -91,12 +94,11 @@ def _segment_moves(start, end, length, steps_per_mm, maximum, entry, exit_speed)
     cruise_time = cruise_distance / peak
     decelerate_time = (peak - exit_speed) / acceleration
     duration = accelerate_time + cruise_time + decelerate_time
-    slices = max(1, math.ceil(duration / SLICE_SECONDS))
+    times = list(_sample_times(accelerate_time, cruise_time, decelerate_time))
     previous = start
     previous_time_ms = 0
     moves = []
-    for index in range(1, slices + 1):
-        elapsed = duration * index / slices
+    for index, elapsed in enumerate(times, 1):
         if elapsed < accelerate_time:
             distance = entry * elapsed + acceleration * elapsed ** 2 / 2
         elif elapsed < accelerate_time + cruise_time:
@@ -105,18 +107,36 @@ def _segment_moves(start, end, length, steps_per_mm, maximum, entry, exit_speed)
             time_left = max(0.0, duration - elapsed)
             distance = length - exit_speed * time_left - acceleration * time_left ** 2 / 2
         fraction = min(1.0, max(0.0, distance / length))
-        target = (end if index == slices else
+        target = (end if index == len(times) else
                   tuple(round(a + (b - a) * fraction) for a, b in zip(start, end)))
         time_ms = round(elapsed * 1000)
         if target == previous:
             continue
         delta = (target[0] - previous[0], target[1] - previous[1])
         minimum_ms = math.ceil(1000 * math.hypot(*delta) / (steps_per_mm * maximum))
-        moves.append(Move(max(round(MIN_COMMAND_SECONDS * 1000), minimum_ms,
-                              time_ms - previous_time_ms), delta,
+        stream_minimum_ms = round(max(MIN_COMMAND_SECONDS, STREAM_MIN_SECONDS) * 1000)
+        moves.append(Move(max(stream_minimum_ms, minimum_ms, time_ms - previous_time_ms), delta,
                           (target[0] / steps_per_mm, target[1] / steps_per_mm)))
         previous, previous_time_ms = target, time_ms
     trailing_ms = round(duration * 1000) - previous_time_ms
     if trailing_ms:
         moves[-1] = replace(moves[-1], duration_ms=moves[-1].duration_ms + trailing_ms)
     yield from moves
+
+
+def _sample_times(accelerate, cruise, decelerate):
+    duration = accelerate + cruise + decelerate
+    minimum_duration = max(MIN_COMMAND_SECONDS, STREAM_MIN_SECONDS)
+    elapsed = 0.0
+    previous = 0.0
+    for phase, interval in ((accelerate, SLICE_SECONDS), (cruise, CRUISE_SECONDS),
+                            (decelerate, SLICE_SECONDS)):
+        slices = max(1, math.ceil(phase / interval))
+        for index in range(1, slices + 1):
+            value = elapsed + phase * index / slices
+            if (value - previous >= minimum_duration
+                    and duration - value >= minimum_duration):
+                yield value
+                previous = value
+        elapsed += phase
+    yield duration
