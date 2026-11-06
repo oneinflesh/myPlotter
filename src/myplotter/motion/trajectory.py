@@ -23,8 +23,8 @@ class Move:
         motors = (dx + dy, dx - dy) if geometry == "mixed" else (dx, dy)
         if any(abs(value) / self.duration_ms > 25 for value in motors):
             raise ValueError("Move exceeds the board step rate")
-        name = "XM" if geometry == "mixed" else "SM"
-        return f"{name},{self.duration_ms},{dx},{dy}"
+        first, second = motors
+        return f"SM,{self.duration_ms},{first},{second}"
 
 
 def plan_path(points, steps_per_mm, speed_mm_s):
