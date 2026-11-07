@@ -5,6 +5,9 @@ def estimate_seconds(drawing, steps_per_mm, speed_mm_s, geometry):
     planner = PlotJob(None, drawing, steps_per_mm, speed_mm_s, geometry, (0, 0))
     total_ms = 0
     for motion in planner._motions():
+        if motion.checkpoint:
+            total_ms += 2000
+            continue
         parts = motion.command.split(",")
         total_ms += int(parts[2] if parts[0] == "SP" else parts[1])
     return total_ms / 1000
