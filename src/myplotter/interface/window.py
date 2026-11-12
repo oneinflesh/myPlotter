@@ -4,7 +4,7 @@ from PySide6.QtCore import QSettings, Qt, QThread
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QProgressDialog, QPushButton,
-                               QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget)
+                               QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from myplotter.connection.board import Board, discover_boards
 from myplotter.machine.profile import SPEED_PRESETS, STEPS_PER_MM
@@ -18,8 +18,6 @@ from myplotter.paper.layout import fit_to_paper, place_on_paper
 from myplotter.plot.job import PlotJob
 from myplotter.plot.estimate import estimate_seconds
 from myplotter.plot.return_job import ReturnJob
-from myplotter.plot.sections import split_sections
-from myplotter.position.mark import mark_start
 from myplotter.position.origin import StartPoint
 from myplotter.svg.loader import SvgLoader
 from myplotter.svg.preview import DrawingPreview
@@ -138,14 +136,6 @@ class MainWindow(QMainWindow):
         self.start_label = QLabel("Use the joystick or place the pen at the paper's top-left corner, then set start.")
         self.start_label.setWordWrap(True)
         sidebar.addWidget(self.start_label)
-        self.mark_button = QPushButton("Mark page start X")
-        self.mark_button.setEnabled(False)
-        self.mark_button.clicked.connect(self.mark_page_start)
-        sidebar.addWidget(self.mark_button)
-        self.section = QSpinBox()
-        self.section.setRange(1, 1)
-        self.section.setEnabled(False)
-        plot_settings.addRow("Start at section", self.section)
 
         plot_row = QHBoxLayout()
         self.plot_button = QPushButton("Start plot")
@@ -234,9 +224,6 @@ class MainWindow(QMainWindow):
             f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
             f"{self.drawing.segments} segments")
         self.preview.set_drawing(self.drawing)
-        self.section.setMaximum(max(1, len(split_sections(self.drawing))))
-        self.section.setValue(1)
-        self.section.setEnabled(True)
         self.update_estimate()
         self.preview.set_start_ready(self.start_point.is_set)
         self.progress.setMaximum(self.drawing.segments)
@@ -272,8 +259,6 @@ class MainWindow(QMainWindow):
         self.placement = (x, y, scale)
         self.drawing = place_on_paper(source, page_width, page_height, scale, x, y)
         self.preview.set_drawing(self.drawing)
-        self.section.setMaximum(max(1, len(split_sections(self.drawing))))
-        self.section.setValue(1)
 
     def _finish_transform(self):
         if self.drag_placement is None:
@@ -335,7 +320,6 @@ class MainWindow(QMainWindow):
         self.start_label.setText("Use the joystick or place the pen at the paper's top-left corner, then set start.")
         self.preview.set_start_ready(False)
         self.return_button.setEnabled(False)
-        self.mark_button.setEnabled(False)
 
     def set_start_point(self):
         try:
@@ -348,25 +332,6 @@ class MainWindow(QMainWindow):
         self.preview.set_start_ready(True)
         self.preview.set_head(0, 0, False)
         self.return_button.setEnabled(True)
-        self.mark_button.setEnabled(True)
-
-    def mark_page_start(self):
-        if self.job is not None or not self.start_point.is_set:
-            return
-        if QMessageBox.question(self, "Mark page start X",
-                                "This draws a 4 mm X centered on the saved page start. "
-                                "Is there clear paper and machine travel 3 mm around it?") != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            self.jog.stop()
-            self.start_point.verify(self.board)
-            mark_start(self.board, STEPS_PER_MM,
-                       SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData())
-            self.start_point.verify(self.board)
-            self.plot_status.setText("Page start X marked. Keep the pen at X to resume a section.")
-        except Exception as error:
-            self.clear_start()
-            QMessageBox.critical(self, "Mark page start X", str(error))
 
     def release_motors(self):
         self.jog.stop()
@@ -417,12 +382,10 @@ class MainWindow(QMainWindow):
         self.job_kind = "plot"
         self.job = PlotJob(self.board, self.drawing, STEPS_PER_MM,
                            SPEED_PRESETS[self.speed.currentText()], self.geometry.currentData(),
-                           self.start_point.steps, source_filename=self.filename or "manual",
-                           start_section=self.section.value())
+                           self.start_point.steps, source_filename=self.filename or "manual")
         self.job.progress.connect(self._plot_progress)
         self.job.prepared.connect(self._plot_prepared)
         self.job.paused.connect(self._pause_changed)
-        self.job.section_changed.connect(self._section_changed)
         self._start_worker()
 
     def back_to_start(self):
@@ -476,12 +439,8 @@ class MainWindow(QMainWindow):
 
     def _plot_prepared(self):
         self.progress.setRange(0, self.drawing.segments)
-        self.progress.setValue(self.job.sections[self.job.start_section - 1].first_segment)
+        self.progress.setValue(0)
         self.plot_status.setText("Plotting…")
-
-    def _section_changed(self, number):
-        self.section.setValue(number)
-        self.plot_status.setText(f"Section {number} / {len(self.job.sections)}")
 
     def _plot_progress(self, count):
         self.progress.setValue(count)
@@ -493,8 +452,6 @@ class MainWindow(QMainWindow):
     def _plot_finished(self, success, message):
         if self.job_kind == "plot" and self.drawing is not None:
             self.progress.setRange(0, self.drawing.segments)
-            if success:
-                self.section.setValue(1)
         if message == "Stopped":
             self.plot_status.setText("Stopped | Back to Start is available")
         else:
@@ -530,7 +487,6 @@ class MainWindow(QMainWindow):
         self.pen_up_button.setEnabled(not active and self.board.connected)
         self.pen_down_button.setEnabled(not active and self.board.connected)
         self.release_button.setEnabled(not active)
-        self.mark_button.setEnabled(not active and self.start_point.is_set and self.board.connected)
 
     def run(self, action):
         try:
