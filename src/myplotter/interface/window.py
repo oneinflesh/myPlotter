@@ -232,8 +232,8 @@ class MainWindow(QMainWindow):
         if self.source_drawing is None:
             return
         fitted, factor = fit_to_paper(self.source_drawing, self.paper.currentText())
-        x = (fitted.width_mm - self.source_drawing.width_mm * factor) / 2
-        y = (fitted.height_mm - self.source_drawing.height_mm * factor) / 2
+        x = min(point[0] for path in fitted.paths for point in path)
+        y = min(point[1] for path in fitted.paths for point in path)
         self.placement = (x, y, factor)
         self._show_drawing(fitted)
         self._update_file_label()
@@ -312,7 +312,7 @@ class MainWindow(QMainWindow):
                           if source.width_mm else float("inf"),
                           (page_height - y) / source.height_mm
                           if source.height_mm else float("inf"))
-            scale = max(min(0.01, maximum), min(maximum, scale + change))
+            scale = max(0.01, min(maximum, scale + change))
         self.placement = (x, y, scale)
         placed = place_on_paper(source, page_width, page_height, scale, x, y)
         self._show_drawing(placed, optimize=False, estimate=False)
