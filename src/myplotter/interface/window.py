@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, Qt, QThread
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout,
                                QGroupBox, QHBoxLayout, QLabel, QMainWindow,
                                QMessageBox, QProgressBar, QProgressDialog, QPushButton,
                                QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
@@ -18,9 +18,11 @@ from myplotter.paper.layout import fit_to_paper, place_on_paper
 from myplotter.plot.job import PlotJob
 from myplotter.plot.estimate import estimate_seconds
 from myplotter.plot.return_job import ReturnJob
+from myplotter.plot.optimize import optimize_travel, pen_up_distance
 from myplotter.position.origin import StartPoint
 from myplotter.svg.loader import SvgLoader
 from myplotter.svg.preview import DrawingPreview
+from myplotter.svg.transform import rotate_quarter_turn
 
 
 class MainWindow(QMainWindow):
@@ -78,7 +80,17 @@ class MainWindow(QMainWindow):
         self.choose_button.clicked.connect(self.choose_svg)
         sidebar.addWidget(self.choose_button)
         self.file_label = QLabel("No SVG selected")
-        canvas.addWidget(self.file_label)
+        file_row = QHBoxLayout()
+        file_row.addWidget(self.file_label, 1)
+        self.rotate_left_button = QPushButton("Rotate left 90°")
+        self.rotate_right_button = QPushButton("Rotate right 90°")
+        self.rotate_left_button.clicked.connect(lambda: self.rotate_image(False))
+        self.rotate_right_button.clicked.connect(lambda: self.rotate_image(True))
+        self.rotate_left_button.setEnabled(False)
+        self.rotate_right_button.setEnabled(False)
+        file_row.addWidget(self.rotate_left_button)
+        file_row.addWidget(self.rotate_right_button)
+        canvas.addLayout(file_row)
         canvas.addWidget(QLabel("Drag artwork to move; drag its blue corner to resize proportionally."))
         self.preview = DrawingPreview()
         self.preview.interaction_started.connect(self._begin_transform)
@@ -102,6 +114,10 @@ class MainWindow(QMainWindow):
         self.speed.setCurrentText("Medium")
         self.speed.currentTextChanged.connect(self.update_estimate)
         plot_settings.addRow("Speed", self.speed)
+        self.optimize_toggle = QCheckBox("Optimize pen-up travel")
+        self.optimize_toggle.setChecked(True)
+        self.optimize_toggle.toggled.connect(self._refresh_optimization)
+        plot_settings.addRow(self.optimize_toggle)
         sidebar.addWidget(self.plot_group)
 
         self.joystick_group = QGroupBox("Position joystick")
@@ -201,6 +217,8 @@ class MainWindow(QMainWindow):
         self.filename = self.loading_filename
         self.loading_filename = None
         self.source_drawing = drawing
+        self.rotate_left_button.setEnabled(True)
+        self.rotate_right_button.setEnabled(True)
         self.apply_page()
 
     def _svg_thread_finished(self):
@@ -217,14 +235,8 @@ class MainWindow(QMainWindow):
         x = (fitted.width_mm - self.source_drawing.width_mm * factor) / 2
         y = (fitted.height_mm - self.source_drawing.height_mm * factor) / 2
         self.placement = (x, y, factor)
-        self.drawing = fitted
-        orientation = "portrait" if self.drawing.height_mm > self.drawing.width_mm else "landscape"
-        self.file_label.setText(
-            f"{Path(self.filename).name} | {self.paper.currentText()} {orientation} "
-            f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
-            f"{self.drawing.segments} segments")
-        self.preview.set_drawing(self.drawing)
-        self.update_estimate()
+        self._show_drawing(fitted)
+        self._update_file_label()
         self.preview.set_start_ready(self.start_point.is_set)
         self.progress.setMaximum(self.drawing.segments)
         self.progress.setValue(0)
@@ -232,6 +244,51 @@ class MainWindow(QMainWindow):
         if self.drawing.skipped:
             notes.append(f"{self.drawing.skipped} text/image elements skipped")
         self.plot_status.setText(" | ".join(notes))
+
+    def _update_file_label(self):
+        orientation = "portrait" if self.drawing.height_mm > self.drawing.width_mm else "landscape"
+        self.file_label.setText(
+            f"{Path(self.filename).name} | {self.paper.currentText()} {orientation} "
+            f"({self.drawing.width_mm:.0f} x {self.drawing.height_mm:.0f} mm) | "
+            f"{self.drawing.segments} segments")
+
+    def _show_drawing(self, drawing, optimize=True, estimate=True):
+        self.drawing = (optimize_travel(drawing)
+                        if optimize and self.optimize_toggle.isChecked() else drawing)
+        self.preview.set_drawing(self.drawing)
+        if estimate:
+            self.update_estimate()
+
+    def _refresh_optimization(self):
+        if self.source_drawing is None or self.placement is None:
+            return
+        x, y, scale = self.placement
+        placed = place_on_paper(self.source_drawing, self.drawing.width_mm,
+                                self.drawing.height_mm, scale, x, y)
+        before = pen_up_distance(placed.paths)
+        self._show_drawing(placed)
+        after = pen_up_distance(self.drawing.paths)
+        self.plot_status.setText(f"Pen-up travel: {before:.0f} → {after:.0f} mm")
+
+    def rotate_image(self, clockwise):
+        if self.source_drawing is None or self.job is not None:
+            return
+        x, y, scale = self.placement
+        source = self.source_drawing
+        center_x = x + source.width_mm * scale / 2
+        center_y = y + source.height_mm * scale / 2
+        rotated = rotate_quarter_turn(source, clockwise)
+        width, height = self.drawing.width_mm, self.drawing.height_mm
+        scale = min(scale, width / rotated.width_mm if rotated.width_mm else scale,
+                    height / rotated.height_mm if rotated.height_mm else scale)
+        x = max(0.0, min(width - rotated.width_mm * scale,
+                         center_x - rotated.width_mm * scale / 2))
+        y = max(0.0, min(height - rotated.height_mm * scale,
+                         center_y - rotated.height_mm * scale / 2))
+        self.source_drawing = rotated
+        self.placement = (x, y, scale)
+        self._refresh_optimization()
+        self._update_file_label()
 
     def _begin_transform(self):
         if self.job is None and self.placement is not None:
@@ -257,14 +314,14 @@ class MainWindow(QMainWindow):
                           if source.height_mm else float("inf"))
             scale = max(min(0.01, maximum), min(maximum, scale + change))
         self.placement = (x, y, scale)
-        self.drawing = place_on_paper(source, page_width, page_height, scale, x, y)
-        self.preview.set_drawing(self.drawing)
+        placed = place_on_paper(source, page_width, page_height, scale, x, y)
+        self._show_drawing(placed, optimize=False, estimate=False)
 
     def _finish_transform(self):
         if self.drag_placement is None:
             return
         self.drag_placement = None
-        self.update_estimate()
+        self._refresh_optimization()
         x, y, scale = self.placement
         self.plot_status.setText(f"Artwork placed at {x:.1f}, {y:.1f} mm | "
                                  f"scale {scale:.0%}")
@@ -474,6 +531,8 @@ class MainWindow(QMainWindow):
         self.refresh_button.setEnabled(not active)
         self.connect_button.setEnabled(not active)
         self.choose_button.setEnabled(not active)
+        self.rotate_left_button.setEnabled(not active and self.source_drawing is not None)
+        self.rotate_right_button.setEnabled(not active and self.source_drawing is not None)
         self.start_button.setEnabled(not active and self.board.connected)
         self.plot_group.setEnabled(not active)
         self.plot_button.setEnabled(not active)
