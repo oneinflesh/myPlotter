@@ -2,7 +2,7 @@ import math
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from myplotter.machine.profile import JOG_SPEED_MM_S, STEPS_PER_MM
+from myplotter.machine.profile import STEPS_PER_MM
 
 
 class JogControl(QObject):
@@ -45,7 +45,7 @@ class JogControl(QObject):
                 self.enabled = True
             x, y = self.direction
             magnitude = math.hypot(x, y)
-            speed = JOG_SPEED_MM_S * min(magnitude, 1)
+            speed = 25 * min(magnitude, 1)
             duration = 80
             step_distance = speed * duration / 1000 * STEPS_PER_MM
             exact_x = self.remainder[0] + x / magnitude * step_distance
